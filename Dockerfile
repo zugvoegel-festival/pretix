@@ -69,7 +69,7 @@ RUN chmod +x /usr/local/bin/pretix && \
     sudo -u pretixuser make production
 
 
-RUN git clone https://github.com/pretix-unofficial/pretix-cliques.git && \
+RUN git clone https://github.com/zugvoegel-festival/pretix-cliques && \
     cd pretix-cliques  && \
     pwd && \
     pip install -e . && \
