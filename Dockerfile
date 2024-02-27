@@ -72,7 +72,6 @@ RUN chmod +x /usr/local/bin/pretix && \
 RUN git clone https://github.com/pretix-unofficial/pretix-cliques.git && \
     cd pretix-cliques  && \
     pwd && \
-    ls -rsa && \
     pip install -e . && \
     make
 
