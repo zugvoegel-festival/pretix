@@ -903,6 +903,10 @@ msgstr "Voller Name"
 msgid "Name"
 msgstr "Name"
 
+#: pretix/presale/templates/pretixpresale/event/checkout_confirm.html:218
+msgid "Take part in the raffle"
+msgstr "An Verlosung teilnehmen"
+
 #: pretix/base/exporters/customers.py:77 pretix/base/models/customers.py:99
 msgid "Account active"
 msgstr "Konto aktiv"
