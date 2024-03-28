@@ -16515,7 +16515,7 @@ msgstr ""
 #: pretix/presale/templates/pretixpresale/event/order_pay_change.html:67
 #: pretix/presale/templates/pretixpresale/event/position_change.html:29
 msgid "Continue"
-msgstr "Fortfahren"
+msgstr "Weiter"
 
 #: pretix/control/templates/pretixcontrol/auth/oauth_authorization.html:8
 msgid "Authorize an application"
@@ -30698,14 +30698,14 @@ msgstr "Bestellung fortsetzen"
 #: pretix/presale/templates/pretixpresale/event/checkout_confirm.html:20
 #: pretix/presale/templates/pretixpresale/event/fragment_cart.html:8
 #: pretix/presale/templates/pretixpresale/event/fragment_cart_box.html:11
-msgid "Your cart"
-msgstr "Dein Warenkorb"
+msgid "Your selection"
+msgstr "Deine Auswahl"
 
 #: pretix/presale/templates/pretixpresale/event/checkout_base.html:28
 #: pretix/presale/templates/pretixpresale/event/checkout_confirm.html:30
 #: pretix/presale/templates/pretixpresale/event/fragment_cart_box.html:17
-msgid "Cart expired"
-msgstr "Warenkorb abgelaufen"
+msgid "Selection expired"
+msgstr "Zeit abgelaufen"
 
 #: pretix/presale/templates/pretixpresale/event/checkout_base.html:36
 msgid "Show full cart"
@@ -30719,8 +30719,8 @@ msgstr "Tickets für anderen Termin hinzufügen"
 #: pretix/presale/templates/pretixpresale/event/checkout_confirm.html:7
 #: pretix/presale/templates/pretixpresale/event/checkout_confirm.html:9
 #: pretix/presale/templates/pretixpresale/event/checkout_confirm.html:10
-msgid "Review order"
-msgstr "Bestellung prüfen"
+msgid "Review data"
+msgstr "Daten prüfen"
 
 #: pretix/presale/templates/pretixpresale/event/checkout_confirm.html:12
 msgid "Please review the details below and confirm your order."
@@ -31405,7 +31405,7 @@ msgstr "Zur Kasse"
 
 #: pretix/presale/templates/pretixpresale/event/fragment_cart_box.html:40
 msgid "Empty cart"
-msgstr "Warenkorb leeren"
+msgstr "Auswahl löschen"
 
 #: pretix/presale/templates/pretixpresale/event/fragment_cart_box.html:45
 #: pretix/presale/templates/pretixpresale/event/index.html:236
