@@ -265,7 +265,7 @@
                             {% endif %}
                         </div>
                     </div>
-                    <div class="col-md-2 col-sm-3 col-xs-6 price">
+                    <div class="col-md-2 col-sm-3 col-xs-6 price {% if item.order_max == 1 and items_by_category|length == 1 %}pull-right{% endif %}">
                         {% if item.original_price %}
                             <p>
                             <del><span class="sr-only">{% trans "Original price:" %}</span>
@@ -343,7 +343,7 @@
                             <p><small><a href="#voucher">{% trans "Enter a voucher code below to buy this ticket." %}</a></small></p>
                         </div>
                     {% elif item.cached_availability.0 == 100 %}
-                        <div class="col-md-2 col-sm-3 col-xs-6 availability-box available">
+                        <div class="col-md-2 col-sm-3 col-xs-6 availability-box available {% if item.order_max == 1 and items_by_category|length == 1 %}hidden{% endif %}">
 							{% if item.order_max == 1 %}
                                 <label class="btn btn-default btn-checkbox">
                                     <input type="checkbox" value="1" {% if itemnum == 1 %}checked{% endif %}
