@@ -13,7 +13,11 @@
                 {% elif request.resolver_match.kwargs.step == step.identifier %}
                     <span class="sr-only">{% trans "Current:" %}</span>
                 {% endif %}
-                {{ step.label }}
+                {% if step.label == "Review order" or step.label == "Bestellung prüfen" %}
+                    {% trans "Review data" %}
+                {% else %}
+                    {{ step.label }}
+                {% endif %}
             </div>
             {% if step.c_is_before %}</a>{% endif %}
         </li>

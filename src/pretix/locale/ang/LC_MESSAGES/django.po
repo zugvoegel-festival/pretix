@@ -27143,7 +27143,7 @@ msgstr ""
 #: pretix/presale/templates/pretixpresale/event/checkout_confirm.html:20
 #: pretix/presale/templates/pretixpresale/event/fragment_cart.html:8
 #: pretix/presale/templates/pretixpresale/event/fragment_cart_box.html:11
-msgid "Your cart"
+msgid "Your selection"
 msgstr ""
 
 #: pretix/presale/templates/pretixpresale/event/checkout_base.html:28
