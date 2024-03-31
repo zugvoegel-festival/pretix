@@ -68,8 +68,12 @@ RUN chmod +x /usr/local/bin/pretix && \
     chown -R pretixuser:pretixuser /pretix /data data &&  \
     sudo -u pretixuser make production
 
-RUN git clone https://github.com/wussler/pretix-cliques &&  cd pretix-cliques  && python setup.py install && python -m pretix migrate && python -m pretix rebuild
 
+RUN git clone https://github.com/zugvoegel-festival/pretix-cliques && \
+    cd pretix-cliques  && \
+    pwd && \
+    pip install -e . && \
+    make
 USER pretixuser
 VOLUME ["/etc/pretix", "/data"]
 EXPOSE 80
