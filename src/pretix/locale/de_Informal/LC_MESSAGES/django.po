@@ -32399,7 +32399,7 @@ msgstr "Deine Auswahl"
 
 #: pretix/presale/templates/pretixpresale/event/checkout_base.html:28
 #: pretix/presale/templates/pretixpresale/event/checkout_confirm.html:30
-#: pretix/presale/templates/pretixpresale/event/fragment_cart_box.html:17
+#: pretix/presale/templates/pretixpresale/event/fragment_cart_box.html:18
 msgid "Cart expired"
 msgstr "Warenkorb abgelaufen"
 
