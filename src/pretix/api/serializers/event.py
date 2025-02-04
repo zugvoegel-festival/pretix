@@ -35,7 +35,7 @@
 import logging
 
 from django.conf import settings
-from django.core.exceptions import ValidationError
+from django.core.exceptions import PermissionDenied
 from django.db import transaction
 from django.utils.crypto import get_random_string
 from django.utils.functional import cached_property
@@ -43,13 +43,19 @@ from django.utils.translation import gettext as _
 from django_countries.serializers import CountryFieldMixin
 from pytz import common_timezones
 from rest_framework import serializers
+from rest_framework.exceptions import ValidationError
 from rest_framework.fields import ChoiceField, Field
 from rest_framework.relations import SlugRelatedField
 
-from pretix.api.serializers import CompatibleJSONField
+from pretix.api.serializers import (
+    CompatibleJSONField, SalesChannelMigrationMixin,
+)
 from pretix.api.serializers.i18n import I18nAwareModelSerializer
 from pretix.api.serializers.settings import SettingsSerializer
-from pretix.base.models import Device, Event, TaxRule, TeamAPIToken
+from pretix.base.models import (
+    CartPosition, Device, Event, OrderPosition, SalesChannel, Seat, TaxRule,
+    TeamAPIToken, Voucher,
+)
 from pretix.base.models.event import SubEvent
 from pretix.base.models.items import (
     ItemMetaProperty, SubEventItem, SubEventItemVariation,
@@ -161,7 +167,7 @@ class ValidKeysField(Field):
         }
 
 
-class EventSerializer(I18nAwareModelSerializer):
+class EventSerializer(SalesChannelMigrationMixin, I18nAwareModelSerializer):
     meta_data = MetaDataField(required=False, source='*')
     item_meta_properties = MetaPropertyField(required=False, source='*')
     plugins = PluginsField(required=False, source='*')
@@ -170,6 +176,13 @@ class EventSerializer(I18nAwareModelSerializer):
     valid_keys = ValidKeysField(source='*', read_only=True)
     best_availability_state = serializers.IntegerField(allow_null=True, read_only=True)
     public_url = serializers.SerializerMethodField('get_event_url', read_only=True)
+    limit_sales_channels = serializers.SlugRelatedField(
+        slug_field="identifier",
+        queryset=SalesChannel.objects.none(),
+        required=False,
+        allow_empty=True,
+        many=True,
+    )
 
     def get_event_url(self, event):
         return build_absolute_uri(event, 'presale:event.index')
@@ -180,7 +193,7 @@ class EventSerializer(I18nAwareModelSerializer):
                   'date_to', 'date_admission', 'is_public', 'presale_start',
                   'presale_end', 'location', 'geo_lat', 'geo_lon', 'has_subevents', 'meta_data', 'seating_plan',
                   'plugins', 'seat_category_mapping', 'timezone', 'item_meta_properties', 'valid_keys',
-                  'sales_channels', 'best_availability_state', 'public_url')
+                  'all_sales_channels', 'limit_sales_channels', 'best_availability_state', 'public_url')
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -188,6 +201,7 @@ class EventSerializer(I18nAwareModelSerializer):
             self.fields.pop('valid_keys')
         if not self.context.get('request') or 'with_availability_for' not in self.context['request'].GET:
             self.fields.pop('best_availability_state')
+        self.fields['limit_sales_channels'].child_relation.queryset = self.context['organizer'].sales_channels.all()
 
     def validate(self, data):
         data = super().validate(data)
@@ -269,13 +283,17 @@ class EventSerializer(I18nAwareModelSerializer):
         from pretix.base.plugins import get_all_plugins
 
         plugins_available = {
-            p.module for p in get_all_plugins(self.instance)
+            p.module: p for p in get_all_plugins(self.instance)
             if not p.name.startswith('.') and getattr(p, 'visible', True)
         }
+        settings_holder = self.instance if self.instance and self.instance.pk else self.context['organizer']
 
         for plugin in value.get('plugins'):
             if plugin not in plugins_available:
                 raise ValidationError(_('Unknown plugin: \'{name}\'.').format(name=plugin))
+            if getattr(plugins_available[plugin], 'restricted', False):
+                if plugin not in settings_holder.settings.allowed_restricted_plugins:
+                    raise ValidationError(_('Restricted plugin: \'{name}\'.').format(name=plugin))
 
         return value
 
@@ -419,7 +437,8 @@ class CloneEventSerializer(EventSerializer):
         testmode = validated_data.pop('testmode', None)
         has_subevents = validated_data.pop('has_subevents', None)
         tz = validated_data.pop('timezone', None)
-        sales_channels = validated_data.pop('sales_channels', None)
+        all_sales_channels = validated_data.pop('all_sales_channels', None)
+        limit_sales_channels = validated_data.pop('limit_sales_channels', None)
         date_admission = validated_data.pop('date_admission', None)
         new_event = super().create({**validated_data, 'plugins': None})
 
@@ -432,8 +451,9 @@ class CloneEventSerializer(EventSerializer):
             new_event.is_public = is_public
         if testmode is not None:
             new_event.testmode = testmode
-        if sales_channels is not None:
-            new_event.sales_channels = sales_channels
+        if all_sales_channels is not None or limit_sales_channels is not None:
+            new_event.all_sales_channels = all_sales_channels
+            new_event.limit_sales_channels.set(limit_sales_channels)
         if has_subevents is not None:
             new_event.has_subevents = has_subevents
         if has_subevents is not None:
@@ -472,7 +492,8 @@ class SubEventSerializer(I18nAwareModelSerializer):
         fields = ('id', 'name', 'date_from', 'date_to', 'active', 'date_admission',
                   'presale_start', 'presale_end', 'location', 'geo_lat', 'geo_lon', 'event', 'is_public',
                   'frontpage_text', 'seating_plan', 'item_price_overrides', 'variation_price_overrides',
-                  'meta_data', 'seat_category_mapping', 'last_modified', 'best_availability_state')
+                  'meta_data', 'seat_category_mapping', 'last_modified', 'best_availability_state',
+                  'comment')
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -660,8 +681,8 @@ class TaxRuleSerializer(CountryFieldMixin, I18nAwareModelSerializer):
 
     class Meta:
         model = TaxRule
-        fields = ('id', 'name', 'rate', 'price_includes_tax', 'eu_reverse_charge', 'home_country', 'internal_name',
-                  'keep_gross_if_rate_changes', 'custom_rules')
+        fields = ('id', 'name', 'rate', 'code', 'price_includes_tax', 'eu_reverse_charge', 'home_country',
+                  'internal_name', 'keep_gross_if_rate_changes', 'custom_rules')
 
 
 class EventSettingsSerializer(SettingsSerializer):
@@ -683,10 +704,12 @@ class EventSettingsSerializer(SettingsSerializer):
         'locales',
         'locale',
         'region',
-        'last_order_modification_date',
+        'allow_modifications',
         'allow_modifications_after_checkin',
+        'last_order_modification_date',
         'show_quota_left',
         'waiting_list_enabled',
+        'waiting_list_auto_disable',
         'waiting_list_hours',
         'waiting_list_auto',
         'waiting_list_names_asked',
@@ -733,6 +756,7 @@ class EventSettingsSerializer(SettingsSerializer):
         'payment_term_accept_late',
         'payment_explanation',
         'payment_pending_hidden',
+        'payment_giftcard__enabled',
         'mail_days_order_expire_warning',
         'ticket_download',
         'ticket_download_date',
@@ -751,6 +775,7 @@ class EventSettingsSerializer(SettingsSerializer):
         'invoice_address_company_required',
         'invoice_address_beneficiary',
         'invoice_address_custom_field',
+        'invoice_address_custom_field_helptext',
         'invoice_name_required',
         'invoice_address_not_asked_free',
         'invoice_show_payments',
@@ -824,6 +849,7 @@ class EventSettingsSerializer(SettingsSerializer):
         'reusable_media_type_nfc_mf0aes_autocreate_giftcard',
         'reusable_media_type_nfc_mf0aes_autocreate_giftcard_currency',
         'reusable_media_type_nfc_mf0aes_random_uid',
+        'seating_allow_blocked_seats_for_channel',
     ]
     readonly_fields = [
         # These are read-only since they are currently only settable on organizers, not events
@@ -874,6 +900,7 @@ class DeviceEventSettingsSerializer(EventSettingsSerializer):
         'locale',
         'last_order_modification_date',
         'show_quota_left',
+        'show_dates_on_frontpage',
         'max_items_per_order',
         'attendee_names_asked',
         'attendee_names_required',
@@ -893,6 +920,7 @@ class DeviceEventSettingsSerializer(EventSettingsSerializer):
         'invoice_address_company_required',
         'invoice_address_beneficiary',
         'invoice_address_custom_field',
+        'invoice_address_custom_field_helptext',
         'invoice_name_required',
         'invoice_address_not_asked_free',
         'invoice_address_from_name',
@@ -949,3 +977,111 @@ class ItemMetaPropertiesSerializer(I18nAwareModelSerializer):
     class Meta:
         model = ItemMetaProperty
         fields = ('id', 'name', 'default', 'required', 'allowed_values')
+
+
+def prefetch_by_id(items, qs, id_attr, target_attr):
+    """
+    Prefetches a related object on each item in the given list of items by searching by id or another
+    unique field. The id value is read from the attribute on item specified in `id_attr`, searched on queryset `qs` by
+    the primary key, and the resulting prefetched model object is stored into `target_attr` on the item.
+    """
+    ids = [getattr(item, id_attr) for item in items if getattr(item, id_attr)]
+    if ids:
+        result = qs.in_bulk(id_list=ids)
+        for item in items:
+            setattr(item, target_attr, result.get(getattr(item, id_attr)))
+
+
+class SeatBulkBlockInputSerializer(serializers.Serializer):
+    ids = serializers.ListField(child=serializers.IntegerField(), required=False, allow_empty=True)
+    seat_guids = serializers.ListField(child=serializers.CharField(), required=False, allow_empty=True)
+
+    def to_internal_value(self, data):
+        data = super().to_internal_value(data)
+
+        if data.get("seat_guids") and data.get("ids"):
+            raise ValidationError("Please pass either seat_guids or ids.")
+
+        if data.get("seat_guids"):
+            seat_ids = data["seat_guids"]
+            if len(seat_ids) > 10000:
+                raise ValidationError({"seat_guids": ["Please do not pass over 10000 seats."]})
+
+            seats = {s.seat_guid: s for s in self.context["queryset"].filter(seat_guid__in=seat_ids)}
+            for s in seat_ids:
+                if s not in seats:
+                    raise ValidationError({"seat_guids": [f"The seat '{s}' does not exist."]})
+        elif data.get("ids"):
+            seat_ids = data["ids"]
+            if len(seat_ids) > 10000:
+                raise ValidationError({"ids": ["Please do not pass over 10000 seats."]})
+
+            seats = self.context["queryset"].in_bulk(seat_ids)
+            for s in seat_ids:
+                if s not in seats:
+                    raise ValidationError({"ids": [f"The seat '{s}' does not exist."]})
+        else:
+            raise ValidationError("Please pass either seat_guids or ids.")
+
+        return {"seats": seats.values()}
+
+
+class SeatSerializer(I18nAwareModelSerializer):
+    orderposition = serializers.IntegerField(source='orderposition_id')
+    cartposition = serializers.IntegerField(source='cartposition_id')
+    voucher = serializers.IntegerField(source='voucher_id')
+
+    class Meta:
+        model = Seat
+        read_only_fields = (
+            'id', 'subevent', 'zone_name', 'row_name', 'row_label',
+            'seat_number', 'seat_label', 'seat_guid', 'product',
+            'orderposition', 'cartposition', 'voucher',
+        )
+        fields = (
+            'id', 'subevent', 'zone_name', 'row_name', 'row_label',
+            'seat_number', 'seat_label', 'seat_guid', 'product', 'blocked',
+            'orderposition', 'cartposition', 'voucher',
+        )
+
+    def prefetch_expanded_data(self, items, request, expand_fields):
+        if 'orderposition' in expand_fields:
+            if 'can_view_orders' not in request.eventpermset:
+                raise PermissionDenied('can_view_orders permission required for expand=orderposition')
+            prefetch_by_id(items, OrderPosition.objects.prefetch_related('order'), 'orderposition_id', 'orderposition')
+        if 'cartposition' in expand_fields:
+            if 'can_view_orders' not in request.eventpermset:
+                raise PermissionDenied('can_view_orders permission required for expand=cartposition')
+            prefetch_by_id(items, CartPosition.objects, 'cartposition_id', 'cartposition')
+        if 'voucher' in expand_fields:
+            if 'can_view_vouchers' not in request.eventpermset:
+                raise PermissionDenied('can_view_vouchers permission required for expand=voucher')
+            prefetch_by_id(items, Voucher.objects, 'voucher_id', 'voucher')
+
+    def __init__(self, instance, *args, **kwargs):
+        if not kwargs.get('data'):
+            self.prefetch_expanded_data(instance if hasattr(instance, '__iter__') else [instance],
+                                        kwargs['context']['request'],
+                                        kwargs['context']['expand_fields'])
+
+        super().__init__(instance, *args, **kwargs)
+
+        if 'orderposition' in self.context['expand_fields']:
+            from pretix.api.serializers.media import (
+                NestedOrderPositionSerializer,
+            )
+            self.fields['orderposition'] = NestedOrderPositionSerializer(read_only=True, context=self.context['order_context'])
+            try:
+                del self.fields['orderposition'].fields['seat']
+            except KeyError:
+                pass
+
+        if 'cartposition' in self.context['expand_fields']:
+            from pretix.api.serializers.cart import CartPositionSerializer
+            self.fields['cartposition'] = CartPositionSerializer(read_only=True)
+            del self.fields['cartposition'].fields['seat']
+
+        if 'voucher' in self.context['expand_fields']:
+            from pretix.api.serializers.voucher import VoucherSerializer
+            self.fields['voucher'] = VoucherSerializer(read_only=True)
+            del self.fields['voucher'].fields['seat']

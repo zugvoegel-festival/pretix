@@ -42,6 +42,8 @@ payment_date                          date                       **DEPRECATED AN
 payment_provider                      string                     **DEPRECATED AND INACCURATE** Payment provider used for this order
 total                                 money (string)             Total value of this order
 comment                               string                     Internal comment on this order
+api_meta                              object                     Meta data for that order. Only available through API, no guarantees
+                                                                 on the content structure. You can use this to save references to your system.
 custom_followup_at                    date                       Internal date for a custom follow-up action
 checkin_attention                     boolean                    If ``true``, the check-in app should show a warning
                                                                  that this ticket requires special attention if a ticket
@@ -82,6 +84,7 @@ fees                                  list of objects            List of fees in
 ├ tax_rate                            decimal (string)           VAT rate applied for this fee
 ├ tax_value                           money (string)             VAT included in this fee
 ├ tax_rule                            integer                    The ID of the used tax rule (or ``null``)
+├ tax_code                            string                     Codified reason for tax rate (or ``null``), see :ref:`rest-taxcodes`.
 └ canceled                            boolean                    Whether or not this fee has been canceled.
 downloads                             list of objects            List of ticket download options for order-wise ticket
                                                                  downloading. This might be a multi-page PDF or a ZIP
@@ -102,6 +105,10 @@ url                                   string                     The full URL to
 payments                              list of objects            List of payment processes (see below)
 refunds                               list of objects            List of refund processes (see below)
 last_modified                         datetime                   Last modification of this object
+cancellation_date                     datetime                   Time of order cancellation (or ``null``). **Note**:
+                                                                 Will not be set for partial cancellations and is not
+                                                                 reliable for orders that have been cancelled,
+                                                                 reactivated and cancelled again.
 ===================================== ========================== =======================================================
 
 
@@ -149,6 +156,13 @@ last_modified                         datetime                   Last modificati
 
    The ``expires`` attribute can now be passed during order creation.
 
+.. versionchanged:: 2024.11
+
+   The ``cancellation_date`` attribute has been added and can also be used as an ordering key.
+
+.. versionchanged:: 2025.1
+
+   The ``tax_code`` attribute has been added.
 
 .. _order-position-resource:
 
@@ -179,8 +193,14 @@ country                               string                     Attendee countr
 state                                 string                     Attendee state (ISO 3166-2 code). Only supported in
                                                                  AU, BR, CA, CN, MY, MX, and US, otherwise ``null``.
 voucher                               integer                    Internal ID of the voucher used for this position (or ``null``)
+voucher_budget_use                    money (string)             Amount of money discounted by the voucher, corresponding
+                                                                 to how much of the ``budget`` of the voucher is consumed.
+                                                                 **Important:** Do not rely on this amount to be a useful
+                                                                 value if the position's price, product or voucher
+                                                                 are changed *after* the order was created. Can be ``null``.
 tax_rate                              decimal (string)           VAT rate applied for this position
 tax_value                             money (string)             VAT included in this position
+tax_code                              string                     Codified reason for tax rate (or ``null``), see :ref:`rest-taxcodes`.
 tax_rule                              integer                    The ID of the used tax rule (or ``null``)
 secret                                string                     Secret code printed on the tickets for validation
 addon_to                              integer                    Internal ID of the position this position is an add-on for (or ``null``)
@@ -196,8 +216,20 @@ checkins                              list of objects            List of **succe
 ├ datetime                            datetime                   Time of check-in
 ├ type                                string                     Type of scan (defaults to ``entry``)
 ├ gate                                integer                    Internal ID of the gate. Can be ``null``.
-├ device                              integer                    Internal ID of the device. Can be ``null``.
+├ device                              integer                    Internal ID of the device. Can be ``null``. **Deprecated**, since this ID is not otherwise used in the API and is therefore not very useful.
+├ device_id                           integer                    Attribute ``device_id`` of the device. Can be ``null``.
 └ auto_checked_in                     boolean                    Indicates if this check-in been performed automatically by the system
+print_logs                            list of objects            List of print jobs recorded e.g. by the pretix apps
+├ id                                  integer                    Internal ID of the print job
+├ successful                          boolean                    Whether the print job successfully resulted in a print.
+                                                                 This is not expected to be 100 % reliable information (since
+                                                                 printer feedback is never perfect) and there is no guarantee
+                                                                 that unsuccessful jobs will be logged.
+├ device_id                           integer                    Attribute ``device_id`` of the device that recorded the print. Can be ``null``.
+├ datetime                            datetime                   Time of printing
+├ source                              string                     Source of print job, e.g. name of the app used.
+├ type                                string                     Type of print (currently ``badge``, ``ticket``, ``certificate``, or ``other``)
+└ info                                object                     Additional data with client-dependent structure.
 downloads                             list of objects            List of ticket download options
 ├ output                              string                     Ticket output provider (e.g. ``pdf``, ``passbook``)
 └ url                                 string                     Download URL
@@ -210,6 +242,11 @@ answers                               list of objects            Answers to user
 seat                                  objects                    The assigned seat. Can be ``null``.
 ├ id                                  integer                    Internal ID of the seat instance
 ├ name                                string                     Human-readable seat name
+├ zone_name                           string                     Name of the zone the seat is in
+├ row_name                            string                     Name/number of the row the seat is in
+├ row_label                           string                     Additional label of the row (or ``null``)
+├ seat_number                         string                     Number of the seat within the row
+├ seat_label                          string                     Additional label of the seat (or ``null``)
 └ seat_guid                           string                     Identifier of the seat within the seating plan
 pdf_data                              object                     Data object required for ticket PDF generation. By default,
                                                                  this field is missing. It will be added only if you add the
@@ -219,6 +256,14 @@ pdf_data                              object                     Data object req
 .. versionchanged:: 4.16
 
    The attributes ``blocked``, ``valid_from`` and ``valid_until`` have been added.
+
+.. versionchanged:: 2024.9
+
+   The attribute ``print_logs`` has been added.
+
+.. versionchanged:: 2025.1
+
+   The ``tax_code`` attribute has been added.
 
 .. _order-payment-resource:
 
@@ -367,9 +412,11 @@ List of all orders
                 "country": "DE",
                 "state": null,
                 "voucher": null,
+                "voucher_budget_use": null,
                 "tax_rate": "0.00",
                 "tax_value": "0.00",
                 "tax_rule": null,
+                "tax_code": null,
                 "secret": "z3fsn8jyufm5kpk768q69gkbyr5f4h6w",
                 "addon_to": null,
                 "subevent": null,
@@ -385,8 +432,19 @@ List of all orders
                     "type": "entry",
                     "gate": null,
                     "device": 2,
+                    "device_id": 1,
                     "datetime": "2017-12-25T12:45:23Z",
                     "auto_checked_in": false
+                  }
+                ],
+                "print_logs": [
+                  {
+                    "id": 1,
+                    "type": "badge",
+                    "datetime": "2017-12-25T12:45:23Z",
+                    "device_id": 1,
+                    "source": "pretixSCAN",
+                    "info": {}
                   }
                 ],
                 "answers": [
@@ -424,14 +482,15 @@ List of all orders
                 "provider": "banktransfer"
               }
             ],
-            "refunds": []
+            "refunds": [],
+            "cancellation_date": null
           }
         ]
       }
 
    :query integer page: The page number in case of a multi-page result set, default is 1
    :query string ordering: Manually set the ordering of results. Valid fields to be used are ``datetime``, ``code``,
-                           ``last_modified``, and ``status``. Default: ``datetime``
+                           ``last_modified``, ``status`` and ``cancellation_date``. Default: ``datetime``
    :query string code: Only return orders that match the given order code
    :query string status: Only return orders in the given order status (see above)
    :query string search: Only return orders matching a given search query (matching for names, email addresses, and company names)
@@ -449,10 +508,13 @@ List of all orders
    :query datetime modified_since: Only return orders that have changed since the given date. Be careful: We only
        recommend using this in combination with ``testmode=false``, since test mode orders can vanish at any time and
        you will not notice it using this method.
-   :query datetime created_since: Only return orders that have been created since the given date.
+   :query datetime created_since: Only return orders that have been created since the given date (inclusive).
+   :query datetime created_before: Only return orders that have been created before the given date (exclusive).
    :query integer subevent: Only return orders with a position that contains this subevent ID. *Warning:* Result will also include orders if they contain mixed subevents, and it will even return orders where the subevent is only contained in a canceled position.
    :query datetime subevent_after: Only return orders that contain a ticket for a subevent taking place after the given date. This is an exclusive after, and it considers the **end** of the subevent (or its start, if the end is not set).
    :query datetime subevent_before: Only return orders that contain a ticket for a subevent taking place after the given date. This is an exclusive before, and it considers the **start** of the subevent.
+   :query string sales_channel: Only return orders with the given sales channel identifier (e.g. ``"web"``).
+   :query string payment_provider: Only return orders that contain a payment using the given payment provider. Note that this also searches for partial incomplete, or failed payments within the order and is not useful to get a sum of payment amounts without further processing.
    :query string exclude: Exclude a field from the output, e.g. ``fees`` or ``positions.downloads``. Can be used as a performance optimization. Can be passed multiple times.
    :query string include: Include only the given field in the output, e.g. ``fees`` or ``positions.downloads``. Can be used as a performance optimization. Can be passed multiple times. ``include`` is applied before ``exclude``, so ``exclude`` takes precedence.
    :param organizer: The ``slug`` field of the organizer to fetch
@@ -548,6 +610,7 @@ Fetching individual orders
         "fees": [],
         "total": "23.00",
         "comment": "",
+        "api_meta": {},
         "custom_followup_at": null,
         "checkin_attention": false,
         "checkin_text": null,
@@ -589,9 +652,11 @@ Fetching individual orders
             "country": "DE",
             "state": null,
             "voucher": null,
+            "voucher_budget_use": null,
             "tax_rate": "0.00",
             "tax_rule": null,
             "tax_value": "0.00",
+            "tax_code": null,
             "secret": "z3fsn8jyufm5kpk768q69gkbyr5f4h6w",
             "addon_to": null,
             "subevent": null,
@@ -607,8 +672,20 @@ Fetching individual orders
                 "type": "entry",
                 "gate": null,
                 "device": 2,
+                "device_id": 1,
                 "datetime": "2017-12-25T12:45:23Z",
                 "auto_checked_in": false
+              }
+            ],
+            "print_logs": [
+              {
+                "id": 1,
+                "type": "badge",
+                "successful": true,
+                "datetime": "2017-12-25T12:45:23Z",
+                "device_id": 1,
+                "source": "pretixSCAN",
+                "info": {}
               }
             ],
             "answers": [
@@ -646,7 +723,8 @@ Fetching individual orders
             "provider": "banktransfer"
           }
         ],
-        "refunds": []
+        "refunds": [],
+        "cancellation_date": null
       }
 
    :param organizer: The ``slug`` field of the organizer to fetch
@@ -727,6 +805,8 @@ Updating order fields
 
    * ``comment``
 
+   * ``api_meta``
+
    * ``custom_followup_at``
 
    * ``invoice_address`` (you always need to supply the full object, or ``null`` to delete the current address)
@@ -775,7 +855,7 @@ Generating new secrets
 
 .. http:post:: /api/v1/organizers/(organizer)/events/(event)/orders/(code)/regenerate_secrets/
 
-   Triggers generation of new ``secret`` attributes for both the order and all order positions.
+   Triggers generation of new ``secret`` and ``web_secret`` attributes for both the order and all order positions.
 
    **Example request**:
 
@@ -806,7 +886,7 @@ Generating new secrets
 
 .. http:post:: /api/v1/organizers/(organizer)/events/(event)/orderpositions/(id)/regenerate_secrets/
 
-   Triggers generation of a new ``secret`` attribute for a single order position.
+   Triggers generation of a new ``secret`` and ``web_secret`` attribute for a single order position.
 
    **Example request**:
 
@@ -956,8 +1036,8 @@ Creating orders
       * ``internal_reference``
       * ``vat_id``
       * ``vat_id_validated`` (optional) – If you need support for reverse charge (rarely the case), you need to check
-       yourself if the passed VAT ID is a valid EU VAT ID. In that case, set this to ``true``. Only valid VAT IDs will
-       trigger reverse charge taxation. Don't forget to set ``is_business`` as well!
+         yourself if the passed VAT ID is a valid EU VAT ID. In that case, set this to ``true``. Only valid VAT IDs will
+         trigger reverse charge taxation. Don't forget to set ``is_business`` as well!
 
    * ``positions``
 
@@ -1541,9 +1621,11 @@ List of all order positions
             },
             "attendee_email": null,
             "voucher": null,
+            "voucher_budget_use": null,
             "tax_rate": "0.00",
             "tax_rule": null,
             "tax_value": "0.00",
+            "tax_code": null,
             "secret": "z3fsn8jyufm5kpk768q69gkbyr5f4h6w",
             "discount": null,
             "pseudonymization_id": "MQLJvANO3B",
@@ -1559,8 +1641,20 @@ List of all order positions
                 "type": "entry",
                 "gate": null,
                 "device": 2,
+                "device_id": 1,
                 "datetime": "2017-12-25T12:45:23Z",
                 "auto_checked_in": false
+              }
+            ],
+            "print_logs": [
+              {
+                "id": 1,
+                "type": "badge",
+                "successful": true,
+                "datetime": "2017-12-25T12:45:23Z",
+                "device_id": 1,
+                "source": "pretixSCAN",
+                "info": {}
               }
             ],
             "answers": [
@@ -1654,9 +1748,11 @@ Fetching individual positions
         },
         "attendee_email": null,
         "voucher": null,
+        "voucher_budget_use": null,
         "tax_rate": "0.00",
         "tax_rule": null,
         "tax_value": "0.00",
+        "tax_code": null,
         "secret": "z3fsn8jyufm5kpk768q69gkbyr5f4h6w",
         "addon_to": null,
         "subevent": null,
@@ -1672,8 +1768,20 @@ Fetching individual positions
             "type": "entry",
             "gate": null,
             "device": 2,
+            "device_id": 1,
             "datetime": "2017-12-25T12:45:23Z",
             "auto_checked_in": false
+          }
+        ],
+        "print_logs": [
+          {
+            "id": 1,
+            "type": "badge",
+            "successful": true,
+            "datetime": "2017-12-25T12:45:23Z",
+            "device_id": 1,
+            "source": "pretixSCAN",
+            "info": {}
           }
         ],
         "answers": [
@@ -1771,6 +1879,10 @@ Manipulating individual positions
 .. versionadded:: 4.16
 
    The endpoints to manage blocks have been added.
+
+.. versionchanged:: 2024.9
+
+   The API now supports logging ticket and badge prints.
 
 .. http:patch:: /api/v1/organizers/(organizer)/events/(event)/orderpositions/(id)/
 
@@ -2030,6 +2142,59 @@ Manipulating individual positions
    :statuscode 400: The order position could not be updated due to invalid submitted data.
    :statuscode 401: Authentication failure
    :statuscode 403: The requested organizer/event does not exist **or** you have no permission to update this order position.
+
+.. http:post:: /api/v1/organizers/(organizer)/events/(event)/orderpositions/(id)/printlog/
+
+   Creates a print log, stating that this ticket has been printed.
+
+   **Example request**:
+
+   .. sourcecode:: http
+
+      POST /api/v1/organizers/bigevents/events/sampleconf/orderpositions/23442/printlog/ HTTP/1.1
+      Host: pretix.eu
+      Accept: application/json, text/javascript
+      Content-Type: application/json
+
+     {
+       "datetime": "2024-09-19T13:37:00+02:00",
+       "source": "pretixPOS",
+       "type": "badge",
+       "info": {
+         "cashier": 1234
+       }
+     }
+
+   **Example response**:
+
+   .. sourcecode:: http
+
+      HTTP/1.1 201 Created
+      Vary: Accept
+      Content-Type: application/pdf
+
+     {
+       "id": 1234,
+       "device_id": null,
+       "datetime": "2024-09-19T13:37:00+02:00",
+       "source": "pretixPOS",
+       "type": "badge",
+       "info": {
+         "cashier": 1234
+       }
+     }
+
+   :param organizer: The ``slug`` field of the organizer to create a log for
+   :param event: The ``slug`` field of the event to create a log for
+   :param id: The ``id`` field of the order position to create a log for
+   :statuscode 201: no error
+   :statuscode 401: Authentication failure
+   :statuscode 403: The requested organizer/event does not exist **or** you have no permission to view this resource
+                    **or** downloads are not available for this order position at this time. The response content will
+                    contain more details.
+   :statuscode 404: The requested order position or download provider does not exist.
+   :statuscode 409: The file is not yet ready and will now be prepared. Retry the request after waiting for a few
+                    seconds.
 
 Changing order contents
 -----------------------

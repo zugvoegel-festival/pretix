@@ -56,10 +56,17 @@ from pretix.base.models import (
 )
 from pretix.base.services.quotas import QuotaAvailability
 from pretix.helpers.dicts import merge_dicts
+from pretix.helpers.i18n import i18ncomp
 
 with scopes_disabled():
     class ItemFilter(FilterSet):
         tax_rate = django_filters.CharFilter(method='tax_rate_qs')
+        search = django_filters.CharFilter(method='search_qs')
+
+        def search_qs(self, queryset, name, value):
+            return queryset.filter(
+                Q(internal_name__icontains=value) | Q(name__icontains=i18ncomp(value))
+            )
 
         def tax_rate_qs(self, queryset, name, value):
             if value in ("0", "None", "0.00"):
@@ -70,6 +77,18 @@ with scopes_disabled():
         class Meta:
             model = Item
             fields = ['active', 'category', 'admission', 'tax_rate', 'free_price']
+
+    class ItemVariationFilter(FilterSet):
+        search = django_filters.CharFilter(method='search_qs')
+
+        def search_qs(self, queryset, name, value):
+            return queryset.filter(
+                Q(value__icontains=i18ncomp(value))
+            )
+
+        class Meta:
+            model = ItemVariation
+            fields = ['active']
 
 
 class ItemViewSet(ConditionalListView, viewsets.ModelViewSet):
@@ -87,6 +106,7 @@ class ItemViewSet(ConditionalListView, viewsets.ModelViewSet):
             'variations', 'addons', 'bundles', 'meta_values', 'meta_values__property',
             'variations__meta_values', 'variations__meta_values__property',
             'require_membership_types', 'variations__require_membership_types',
+            'limit_sales_channels', 'variations__limit_sales_channels',
         ).all()
 
     def perform_create(self, serializer):
@@ -139,6 +159,7 @@ class ItemVariationViewSet(viewsets.ModelViewSet):
     serializer_class = ItemVariationSerializer
     queryset = ItemVariation.objects.none()
     filter_backends = (DjangoFilterBackend, TotalOrderingFilter,)
+    filterset_class = ItemVariationFilter
     ordering_fields = ('id', 'position')
     ordering = ('id',)
     permission = None
@@ -152,7 +173,8 @@ class ItemVariationViewSet(viewsets.ModelViewSet):
         return self.item.variations.all().prefetch_related(
             'meta_values',
             'meta_values__property',
-            'require_membership_types'
+            'require_membership_types',
+            'limit_sales_channels',
         )
 
     def get_serializer_context(self):
@@ -597,7 +619,7 @@ class QuotaViewSet(ConditionalListView, viewsets.ModelViewSet):
     def availability(self, request, *args, **kwargs):
         quota = self.get_object()
 
-        qa = QuotaAvailability()
+        qa = QuotaAvailability(full_results=True)
         qa.queue(quota)
         qa.compute()
         avail = qa.results[quota]

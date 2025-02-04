@@ -50,10 +50,14 @@ from pretix.base.models.customers import CustomerSSOProvider
 from pretix.base.models.items import (
     ItemAddOn, ItemBundle, ItemVariation, SubEventItem, SubEventItemVariation,
 )
+from pretix.base.services.cart import CartManager
 from pretix.base.services.orders import OrderError, _perform_order
 from pretix.base.services.tax import VATIDFinalError, VATIDTemporaryError
+from pretix.base.timemachine import time_machine_now_assigned
 from pretix.testutils.scope import classscope
 from pretix.testutils.sessions import get_cart_session_key
+
+from .test_timemachine import TimemachineTestMixin
 
 
 class BaseCheckoutTestCase:
@@ -64,7 +68,7 @@ class BaseCheckoutTestCase:
         self.event = Event.objects.create(
             organizer=self.orga, name='30C3', slug='30c3',
             date_from=datetime.datetime(now().year + 1, 12, 26, tzinfo=datetime.timezone.utc),
-            plugins='pretix.plugins.stripe,pretix.plugins.banktransfer',
+            plugins='pretix.plugins.stripe,pretix.plugins.banktransfer,tests.testdummy',
             live=True
         )
         self.tr19 = self.event.tax_rules.create(rate=19)
@@ -121,7 +125,7 @@ class BaseCheckoutTestCase:
         }]
 
 
-class CheckoutTestCase(BaseCheckoutTestCase, TestCase):
+class CheckoutTestCase(BaseCheckoutTestCase, TimemachineTestMixin, TestCase):
 
     def _enable_reverse_charge(self):
         self.tr19.eu_reverse_charge = True
@@ -146,6 +150,28 @@ class CheckoutTestCase(BaseCheckoutTestCase, TestCase):
             )
         self._set_session('invoice_address', ia.pk)
         return ia
+
+    def test_pci_page(self):
+        with scopes_disabled():
+            CartPosition.objects.create(
+                event=self.event, cart_id=self.session_key, item=self.ticket,
+                price=23, expires=now() + timedelta(minutes=10)
+            )
+
+        r = self.client.get('/%s/%s/checkout/questions/' % (self.orga.slug, self.event.slug))
+        assert b'TRACKING SCRIPT' in r.content
+
+        payment_r = self.client.post('/%s/%s/checkout/questions/' % (self.orga.slug, self.event.slug), {
+            'is_business': 'business',
+            'company': 'Foo',
+            'name': 'Bar',
+            'street': 'Baz',
+            'zipcode': '1234',
+            'city': 'Here',
+            'country': 'AT',
+            'email': 'admin@localhost'
+        }, follow=True)
+        assert b'TRACKING SCRIPT' not in payment_r.content
 
     def test_empty_cart(self):
         response = self.client.get('/%s/%s/checkout/start' % (self.orga.slug, self.event.slug), follow=True)
@@ -1166,6 +1192,65 @@ class CheckoutTestCase(BaseCheckoutTestCase, TestCase):
             'city': 'Here',
             'country': 'DE',
             'vat_id': 'DE123456',
+            'email': 'admin@localhost'
+        }, follow=True)
+        self.assertRedirects(response, '/%s/%s/checkout/payment/' % (self.orga.slug, self.event.slug),
+                             target_status_code=200)
+        with scopes_disabled():
+            ia = InvoiceAddress.objects.last()
+        assert ia.name_parts == {
+            'title': 'Mr',
+            'given_name': 'John',
+            'middle_name': '',
+            'family_name': 'Kennedy',
+            "_scheme": "title_given_middle_family"
+        }
+        assert ia.name_cached == 'Mr John Kennedy'
+
+    def test_invoice_address_required_no_zipcode_country(self):
+        self.event.settings.invoice_address_asked = True
+        self.event.settings.invoice_address_required = True
+        self.event.settings.invoice_address_not_asked_free = True
+        self.event.settings.set('name_scheme', 'title_given_middle_family')
+
+        with scopes_disabled():
+            CartPosition.objects.create(
+                event=self.event, cart_id=self.session_key, item=self.ticket,
+                price=23, expires=now() + timedelta(minutes=10)
+            )
+        response = self.client.get('/%s/%s/checkout/questions/' % (self.orga.slug, self.event.slug), follow=True)
+        doc = BeautifulSoup(response.content.decode(), "lxml")
+        self.assertEqual(len(doc.select('input[name="city"]')), 1)
+
+        # Not all required fields filled out, expect failure
+        response = self.client.post('/%s/%s/checkout/questions/' % (self.orga.slug, self.event.slug), {
+            'is_business': 'business',
+            'company': 'Foo',
+            'name_parts_0': 'Mr',
+            'name_parts_1': 'John',
+            'name_parts_2': '',
+            'name_parts_3': 'Kennedy',
+            'street': '',
+            'zipcode': '',
+            'city': '',
+            'country': 'BI',
+            'email': 'admin@localhost'
+        }, follow=True)
+        doc = BeautifulSoup(response.content.decode(), "lxml")
+        self.assertGreaterEqual(len(doc.select('.has-error')), 1)
+
+        # Correct request for a country where zip code is not required in address
+        response = self.client.post('/%s/%s/checkout/questions/' % (self.orga.slug, self.event.slug), {
+            'is_business': 'business',
+            'company': 'Foo',
+            'name_parts_0': 'Mr',
+            'name_parts_1': 'John',
+            'name_parts_2': '',
+            'name_parts_3': 'Kennedy',
+            'street': 'BP 12345',
+            'zipcode': '',
+            'city': 'Bujumbura',
+            'country': 'BI',
             'email': 'admin@localhost'
         }, follow=True)
         self.assertRedirects(response, '/%s/%s/checkout/payment/' % (self.orga.slug, self.event.slug),
@@ -2544,6 +2629,98 @@ class CheckoutTestCase(BaseCheckoutTestCase, TestCase):
             assert op.valid_from.isoformat() == '2023-01-20T11:00:00+00:00'
             assert op.valid_until.isoformat() == '2023-01-20T13:00:00+00:00'
 
+    @freeze_time("2023-01-18 10:00:00+00:00")
+    def test_validity_requested_with_time_machine(self):
+        self._login_with_permission(self.orga)
+        self._enable_test_mode()
+        self._set_time_machine_now(now() - timedelta(days=10))
+        self.ticket.available_from = now() - timedelta(days=11)
+        self.ticket.available_until = now() - timedelta(days=9)
+        self.ticket.validity_mode = Item.VALIDITY_MODE_DYNAMIC
+        self.ticket.validity_dynamic_duration_days = 1
+        self.ticket.validity_dynamic_start_choice = True
+        self.ticket.validity_dynamic_start_choice_day_limit = 5
+        self.ticket.save()
+
+        with scopes_disabled():
+            cr1 = CartPosition.objects.create(
+                event=self.event, cart_id=self.session_key, item=self.ticket,
+                price=42, listed_price=42, price_after_voucher=42, expires=now() + timedelta(minutes=10)
+            )
+
+        # Date too far in the future, expected to fail
+        response = self.client.post('/%s/%s/checkout/questions/' % (self.orga.slug, self.event.slug), {
+            '%s-requested_valid_from' % cr1.id: '2024-01-17',
+            'email': 'admin@localhost'
+        }, follow=True)
+        doc = BeautifulSoup(response.content.decode(), "lxml")
+        self.assertGreaterEqual(len(doc.select('.has-error')), 1)
+
+        # Corrected request
+        response = self.client.post('/%s/%s/checkout/questions/' % (self.orga.slug, self.event.slug), {
+            '%s-requested_valid_from' % cr1.id: '2023-01-10',
+            'email': 'admin@localhost'
+        }, follow=True)
+        self.assertRedirects(response, '/%s/%s/checkout/payment/' % (self.orga.slug, self.event.slug),
+                             target_status_code=200)
+
+        cr1.refresh_from_db()
+        assert cr1.requested_valid_from.isoformat() == '2023-01-10T00:00:00+00:00'
+
+        self._set_payment()
+
+        response = self.client.post('/%s/%s/checkout/confirm/' % (self.orga.slug, self.event.slug), follow=True)
+        doc = BeautifulSoup(response.content.decode(), "lxml")
+        with scopes_disabled():
+            self.assertEqual(len(doc.select(".thank-you")), 1)
+            self.assertFalse(CartPosition.objects.filter(id=cr1.id).exists())
+            self.assertEqual(Order.objects.count(), 1)
+            self.assertEqual(OrderPosition.objects.count(), 1)
+            op = OrderPosition.objects.get()
+            assert op.valid_from.isoformat() == '2023-01-10T00:00:00+00:00'
+            assert op.valid_until.isoformat() == '2023-01-10T23:59:59+00:00'
+
+    @freeze_time("2023-01-18 10:00:00+00:00")
+    def test_dynamic_validity_with_time_machine(self):
+        self._login_with_permission(self.orga)
+        self._enable_test_mode()
+        self._set_time_machine_now(now() + timedelta(days=10))
+        self.ticket.available_from = now() + timedelta(days=3)
+        self.ticket.validity_mode = Item.VALIDITY_MODE_DYNAMIC
+        self.ticket.validity_dynamic_duration_days = 1
+        self.ticket.validity_dynamic_start_choice = False
+        self.ticket.save()
+
+        with scopes_disabled():
+            cr1 = CartPosition.objects.create(
+                event=self.event, cart_id=self.session_key, item=self.ticket,
+                price=42, listed_price=42, price_after_voucher=42, expires=now() + timedelta(minutes=10)
+            )
+
+        response = self.client.post('/%s/%s/checkout/questions/' % (self.orga.slug, self.event.slug), {
+            'email': 'admin@localhost'
+        }, follow=True)
+        self.assertRedirects(response, '/%s/%s/checkout/payment/' % (self.orga.slug, self.event.slug),
+                             target_status_code=200)
+
+        cr1.refresh_from_db()
+        with time_machine_now_assigned(now() + timedelta(days=10)):
+            assert cr1.predicted_validity[0].isoformat() == '2023-01-28T10:00:00+00:00'
+            assert cr1.predicted_validity[1].isoformat() == '2023-01-28T23:59:59+00:00'
+
+        self._set_payment()
+
+        response = self.client.post('/%s/%s/checkout/confirm/' % (self.orga.slug, self.event.slug), follow=True)
+        doc = BeautifulSoup(response.content.decode(), "lxml")
+        with scopes_disabled():
+            self.assertEqual(len(doc.select(".thank-you")), 1)
+            self.assertFalse(CartPosition.objects.filter(id=cr1.id).exists())
+            self.assertEqual(Order.objects.count(), 1)
+            self.assertEqual(OrderPosition.objects.count(), 1)
+            op = OrderPosition.objects.get()
+            assert op.valid_from.isoformat() == '2023-01-28T10:00:00+00:00'
+            assert op.valid_until.isoformat() == '2023-01-28T23:59:59+00:00'
+
     def test_voucher(self):
         with scopes_disabled():
             v = Voucher.objects.create(item=self.ticket, value=Decimal('12.00'), event=self.event, price_mode='set',
@@ -3485,6 +3662,28 @@ class CheckoutTestCase(BaseCheckoutTestCase, TestCase):
         doc = BeautifulSoup(response.content.decode(), "lxml")
         self.assertEqual(len(doc.select(".thank-you")), 1)
 
+    def test_before_presale_timemachine(self):
+        self._login_with_permission(self.orga)
+        self._enable_test_mode()
+        self._set_time_machine_now(now() + timedelta(days=4))
+        self.event.presale_start = now() + timedelta(days=3)
+        self.event.save()
+        with scopes_disabled():
+            CartPosition.objects.create(
+                event=self.event, cart_id=self.session_key, item=self.ticket,
+                price=23, expires=now() + timedelta(minutes=10)
+            )
+
+        self._set_payment()
+        response = self.client.get('/%s/%s/checkout/confirm/' % (self.orga.slug, self.event.slug), follow=True)
+        assert "test mode" in response.content.decode()
+        response = self.client.post('/%s/%s/checkout/confirm/' % (self.orga.slug, self.event.slug), follow=True)
+        doc = BeautifulSoup(response.content.decode(), "lxml")
+        self.assertEqual(len(doc.select(".thank-you")), 1)
+        with scopes_disabled():
+            assert Order.objects.last().testmode
+            assert Order.objects.last().code[1] == "0"
+
     def test_create_testmode_order_in_testmode(self):
         self.event.testmode = True
         self.event.save()
@@ -3642,6 +3841,7 @@ class QuestionsTestCase(BaseCheckoutTestCase, TestCase):
             o3 = QuestionAnswer.objects.get(question=q3)
             order = Order.objects.create(event=self.event, status=Order.STATUS_PAID,
                                          expires=now() + timedelta(days=3),
+                                         sales_channel=self.orga.sales_channels.get(identifier="web"),
                                          total=4)
             op = OrderPosition.objects.create(order=order, item=self.ticket, price=42)
             o1.cartposition, o2.cartposition, o3.cartposition = None, None, None
@@ -4315,6 +4515,55 @@ class CheckoutBundleTest(BaseCheckoutTestCase, TestCase):
         response = self.client.post('/%s/%s/checkout/confirm/' % (self.orga.slug, self.event.slug), follow=True)
         doc = BeautifulSoup(response.content.decode(), "lxml")
         self.assertEqual(len(doc.select(".thank-you")), 1)
+
+    @classscope(attr='orga')
+    def test_bundle_and_discount_with_inverted_cart_order(self):
+        """
+        This test tells the story of a beautiful bug.
+
+        Cart positions have no natural order. They have a display order (CartPosition.sort_key), which however is
+        dependant on mutable values like the price. Therefore, e.g. applying a discount can change the cart order.
+        However, all order logic must be independent of the order in which the cart positions are in the database.
+        Therefore this test artificially creates a card where the `pk` values of the positions are *inverse* of what
+        they should be and checks that the order still goes through fine.
+
+        More details about the bug in the commit message that introduces this test.
+        """
+        self.event.discounts.create(
+            condition_min_count=4,
+            benefit_discount_matching_percent=50,
+            benefit_only_apply_to_cheapest_n_matches=1,
+        )
+        CartPosition.objects.filter(addon_to__isnull=False).delete()
+        CartPosition.objects.all().delete()
+        cm = CartManager(event=self.event, cart_id="temp", sales_channel=self.orga.sales_channels.get(identifier="web"))
+        cm.add_new_items([{
+            'item': self.ticket.pk,
+            'variation': None,
+            'count': 4
+        }])
+        cm.commit()
+
+        map = {}
+        for cp in reversed(CartPosition.objects.filter(addon_to__isnull=True, cart_id="temp")):
+            map[cp.pk] = cp
+            cp.pk = None
+            cp.cart_id = self.session_key
+            cp.save()
+        for cp in reversed(CartPosition.objects.filter(addon_to__isnull=False, cart_id="temp")):
+            cp.pk = None
+            cp.cart_id = self.session_key
+            cp.addon_to = map[cp.addon_to_id]
+            cp.save()
+        cm = CartManager(event=self.event, cart_id=self.session_key, sales_channel=self.orga.sales_channels.get(identifier="web"))
+        cm.commit()  # execute discounts on resorted cart
+
+        self._set_payment()
+        response = self.client.post('/%s/%s/checkout/confirm/' % (self.orga.slug, self.event.slug), follow=True)
+        doc = BeautifulSoup(response.content.decode(), "lxml")
+        self.assertEqual(len(doc.select(".thank-you")), 1)
+        o = Order.objects.get()
+        assert o.positions.count() == 8
 
 
 class CheckoutSeatingTest(BaseCheckoutTestCase, TestCase):

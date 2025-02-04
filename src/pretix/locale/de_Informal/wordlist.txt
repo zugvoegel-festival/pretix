@@ -4,6 +4,7 @@ AES
 Absenderadresse
 Absenderinformation
 Absendername
+ABGEKÜNDIGT
 Admin
 Adminbereich
 Affirm
@@ -25,6 +26,7 @@ Ausgangsscans
 ausgeklappt
 ausgecheckt
 auswahl
+Auth
 Authentication
 Authenticator
 Authentifizierungsmechanismus
@@ -33,8 +35,10 @@ Backend
 Badge
 Badges
 Bancontact
+BankID
 Banking
 barcodes
+Baskisch
 Bcc
 BCC
 Beispielevent
@@ -62,10 +66,12 @@ BSD
 bspw
 Bokmål
 Boleto
+Buchhaltungs
 Bundles
 Butterfly
 bzw
 ca
+Ceuta
 Cc
 chardet
 charge
@@ -78,6 +84,7 @@ Connect
 Consent
 Copyleft
 Cronjob
+Cross
 csv
 Customer
 CZK
@@ -153,9 +160,12 @@ Inc
 inkl
 innenname
 innennamen
+innergemeinschaftliche
+Innergemeinschaftlicher
 Input
 Installations
 integrationen
+intra
 INV
 invalidieren
 invalidiert
@@ -172,10 +182,12 @@ Kombitickets
 Kompatibilitätsmodus
 Konfigurations
 Kosovo
+land
 landesspezifische
 Lead
 Leaflet
 Linktext
+lit
 Logindaten
 Lösch
 loszulegen
@@ -183,6 +195,7 @@ Ltd
 max
 MariaDB
 MapQuest
+Melilla
 Mercado
 Merchandise
 Meta
@@ -193,6 +206,7 @@ Mitgliedschafts
 Mitgliedschaftsdauer
 min
 Mo
+MobilePay
 MOTO
 Multibanco
 MwSt
@@ -258,10 +272,12 @@ Requests
 Reservierungszeitraum
 reverse
 Revisionssicherheit
+Revolut
 rückabgewickelt
 Rundungsdifferenzen
 Sa
 Saalplan
+Sammlungsstücken
 SAQ
 SCA
 Scan
@@ -275,6 +291,7 @@ Scopes
 sechsstelligen
 Secret
 Security
+Selling
 SEPA
 Shirts
 Signaturverfahren
@@ -301,6 +318,7 @@ Strg
 Stripe
 Stripes
 Strong
+Swish
 systemweiten
 Tab
 tag
@@ -318,6 +336,7 @@ Tracking
 transaktionale
 Trustly
 Turnover
+TWINT
 txt
 überbuchen
 überbucht
@@ -347,6 +366,7 @@ USt
 Überzahlten
 Validierung
 Venmo
+Veranstalterdomain
 Veranstaltereinstellungen
 Veranstalterkonten
 Veranstalterkonto
@@ -357,6 +377,7 @@ Veranstalterseite
 Veranstalterübersicht
 veranstalterweiten
 Veranstaltungs
+Veranstalterdomain
 veranstaltungsweiten
 Verfügbarkeitsberechnung
 Verfügbarkeitsstatus

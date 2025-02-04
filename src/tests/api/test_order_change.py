@@ -100,7 +100,8 @@ def order(event, item, taxrule, question):
             status=Order.STATUS_PENDING, secret="k24fiuwvu8kxz3y1",
             datetime=datetime.datetime(2017, 12, 1, 10, 0, 0, tzinfo=datetime.timezone.utc),
             expires=datetime.datetime(2017, 12, 10, 10, 0, 0, tzinfo=datetime.timezone.utc),
-            total=23, locale='en'
+            total=23, locale='en',
+            sales_channel=event.organizer.sales_channels.get(identifier="web"),
         )
         p1 = o.payments.create(
             provider='stripe',
@@ -254,6 +255,9 @@ def test_order_update_allowed_fields(token_client, organizer, event, order):
             organizer.slug, event.slug, order.code
         ), format='json', data={
             'comment': 'Here is a comment',
+            'api_meta': {
+                'test': 1
+            },
             'valid_if_pending': True,
             'custom_followup_at': '2021-06-12',
             'checkin_attention': True,
@@ -279,6 +283,9 @@ def test_order_update_allowed_fields(token_client, organizer, event, order):
     assert resp.status_code == 200
     order.refresh_from_db()
     assert order.comment == 'Here is a comment'
+    assert order.api_meta == {
+        'test': 1
+    }
     assert order.custom_followup_at.isoformat() == '2021-06-12'
     assert order.checkin_attention
     assert order.checkin_text == 'foobar'
@@ -444,7 +451,7 @@ def test_order_create_invoice(token_client, organizer, event, order):
         "invoice_to_vat_id": "DE123",
         "invoice_to_beneficiary": "",
         "custom_field": None,
-        'date': now().date().isoformat(),
+        'date': now().astimezone(event.timezone).date().isoformat(),
         'refers': None,
         'locale': 'en',
         'introductory_text': '',
@@ -468,6 +475,7 @@ def test_order_create_invoice(token_client, organizer, event, order):
                 'gross_value': '23.00',
                 'tax_value': '0.00',
                 'tax_rate': '0.00',
+                'tax_code': None,
                 'tax_name': ''
             },
             {
@@ -485,6 +493,7 @@ def test_order_create_invoice(token_client, organizer, event, order):
                 'gross_value': '0.25',
                 'tax_value': '0.05',
                 'tax_rate': '19.00',
+                'tax_code': None,
                 'tax_name': ''
             }
         ],
@@ -517,6 +526,7 @@ def test_order_regenerate_secrets(token_client, organizer, event, order):
     s = order.secret
     with scopes_disabled():
         ps = order.positions.first().secret
+        psw = order.positions.first().web_secret
     resp = token_client.post(
         '/api/v1/organizers/{}/events/{}/orders/{}/regenerate_secrets/'.format(
             organizer.slug, event.slug, order.code
@@ -527,6 +537,7 @@ def test_order_regenerate_secrets(token_client, organizer, event, order):
     assert s != order.secret
     with scopes_disabled():
         assert ps != order.positions.first().secret
+        assert psw != order.positions.first().web_secret
 
 
 @pytest.mark.django_db
@@ -534,6 +545,7 @@ def test_position_regenerate_secrets(token_client, organizer, event, order):
     with scopes_disabled():
         p = order.positions.first()
         ps = p.secret
+        psw = p.web_secret
     resp = token_client.post(
         '/api/v1/organizers/{}/events/{}/orderpositions/{}/regenerate_secrets/'.format(
             organizer.slug, event.slug, p.pk,
@@ -543,6 +555,7 @@ def test_position_regenerate_secrets(token_client, organizer, event, order):
     p.refresh_from_db()
     with scopes_disabled():
         assert ps != p.secret
+        assert psw != p.web_secret
 
 
 @pytest.mark.django_db

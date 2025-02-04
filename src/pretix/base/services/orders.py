@@ -62,7 +62,6 @@ from django.utils.translation import gettext as _, gettext_lazy, ngettext_lazy
 from django_scopes import scopes_disabled
 
 from pretix.api.models import OAuthApplication
-from pretix.base.channels import get_all_sales_channels
 from pretix.base.email import get_email_context
 from pretix.base.i18n import get_language_without_region, language
 from pretix.base.media import MEDIA_TYPES
@@ -76,7 +75,7 @@ from pretix.base.models.orders import (
     BlockedTicketSecret, InvoiceAddress, OrderFee, OrderRefund,
     generate_secret,
 )
-from pretix.base.models.organizer import TeamAPIToken
+from pretix.base.models.organizer import SalesChannel, TeamAPIToken
 from pretix.base.models.tax import TAXED_ZERO, TaxedPrice, TaxRule
 from pretix.base.payment import GiftCardPayment, PaymentException
 from pretix.base.reldate import RelativeDateWrapper
@@ -98,11 +97,11 @@ from pretix.base.services.pricing import (
 from pretix.base.services.quotas import QuotaAvailability
 from pretix.base.services.tasks import ProfiledEventTask, ProfiledTask
 from pretix.base.signals import (
-    allow_ticket_download, order_approved, order_canceled, order_changed,
-    order_denied, order_expired, order_fee_calculation, order_paid,
-    order_placed, order_split, order_valid_if_pending, periodic_task,
-    validate_order,
+    order_approved, order_canceled, order_changed, order_denied, order_expired,
+    order_fee_calculation, order_paid, order_placed, order_reactivated,
+    order_split, order_valid_if_pending, periodic_task, validate_order,
 )
+from pretix.base.timemachine import time_machine_now, time_machine_now_assigned
 from pretix.celery_app import app
 from pretix.helpers import OF_SELF
 from pretix.helpers.models import modelcopy
@@ -198,8 +197,9 @@ error_messages = {
         'You need to select at least %(min)s add-ons from the category %(cat)s for the product %(base)s.',
         'min'
     ),
-    'addon_no_multi': gettext_lazy('You can select every add-ons from the category %(cat)s for the product %(base)s at most once.'),
+    'addon_no_multi': gettext_lazy('You can select every add-on from the category %(cat)s for the product %(base)s at most once.'),
     'addon_already_checked_in': gettext_lazy('You cannot remove the position %(addon)s since it has already been checked in.'),
+    'currency_XXX': gettext_lazy('Paid products not supported without a valid currency.'),
 }
 
 logger = logging.getLogger(__name__)
@@ -221,7 +221,7 @@ def reactivate_order(order: Order, force: bool=False, user: User=None, auth=None
         is_available = order._is_still_available(now(), count_waitinglist=False, check_voucher_usage=True,
                                                  check_memberships=True, lock=True, force=force)
         if is_available is True:
-            if order.payment_refund_sum >= order.total:
+            if order.payment_refund_sum >= order.total and not order.require_approval:
                 order.status = Order.STATUS_PAID
             else:
                 order.status = Order.STATUS_PENDING
@@ -253,7 +253,7 @@ def reactivate_order(order: Order, force: bool=False, user: User=None, auth=None
         else:
             raise OrderError(is_available)
 
-    order_approved.send(order.event, order=order)
+    order_reactivated.send(order.event, order=order)
     if order.status == Order.STATUS_PAID:
         order_paid.send(order.event, order=order)
 
@@ -298,6 +298,7 @@ def extend_order(order: Order, new_date: datetime, force: bool=False, valid_if_p
                 auth=auth,
                 data={
                     'expires': order.expires,
+                    'force': force,
                     'state_change': was_expired
                 }
             )
@@ -413,6 +414,11 @@ def approve_order(order, user=None, send_mail: bool=True, auth=None, force=False
                     email_subject, email_template, email_context,
                     'pretix.event.order.email.order_approved', user,
                     attach_tickets=True,
+                    attach_ical=order.event.settings.mail_attach_ical and (
+                        not order.event.settings.mail_attach_ical_paid_only or
+                        order.total == Decimal('0.00') or
+                        order.valid_if_pending
+                    ),
                     invoices=[invoice] if invoice and order.event.settings.invoice_email_attachment else []
                 )
             except SendMailException:
@@ -462,10 +468,10 @@ def deny_order(order, comment='', user=None, send_mail: bool=True, auth=None):
     order_denied.send(order.event, order=order)
 
     if send_mail:
-        email_template = order.event.settings.mail_text_order_denied
-        email_subject = order.event.settings.mail_subject_order_denied
-        email_context = get_email_context(event=order.event, order=order, comment=comment)
         with language(order.locale, order.event.settings.region):
+            email_template = order.event.settings.mail_text_order_denied
+            email_subject = order.event.settings.mail_subject_order_denied
+            email_context = get_email_context(event=order.event, order=order, comment=comment)
             try:
                 order.send_mail(
                     email_subject, email_template, email_context,
@@ -642,10 +648,10 @@ def _check_date(event: Event, now_dt: datetime):
                 raise OrderError(error_messages['ended'])
 
 
-def _check_positions(event: Event, now_dt: datetime, positions: List[CartPosition], address: InvoiceAddress=None,
-                     sales_channel='web', customer=None):
+def _check_positions(event: Event, now_dt: datetime, time_machine_now_dt: datetime, positions: List[CartPosition],
+                     sales_channel: SalesChannel, address: InvoiceAddress=None, customer=None):
     err = None
-    _check_date(event, now_dt)
+    _check_date(event, time_machine_now_dt)
 
     products_seen = Counter()
     q_avail = Counter()
@@ -666,7 +672,7 @@ def _check_positions(event: Event, now_dt: datetime, positions: List[CartPositio
             deleted_positions.add(cp.pk)
             cp.delete()
 
-    sorted_positions = sorted(positions, key=lambda s: -int(s.is_bundled))
+    sorted_positions = sorted(positions, key=lambda c: (-int(c.is_bundled), c.pk))
 
     for cp in sorted_positions:
         cp._cached_quotas = list(cp.quotas)
@@ -723,7 +729,7 @@ def _check_positions(event: Event, now_dt: datetime, positions: List[CartPositio
                 delete(cp)
                 continue
 
-        if cp.subevent and cp.subevent.presale_start and now_dt < cp.subevent.presale_start:
+        if cp.subevent and cp.subevent.presale_start and time_machine_now_dt < cp.subevent.presale_start:
             err = err or error_messages['some_subevent_not_started']
             delete(cp)
             break
@@ -735,7 +741,7 @@ def _check_positions(event: Event, now_dt: datetime, positions: List[CartPositio
                     tlv.datetime(cp.subevent).date(),
                     time(hour=23, minute=59, second=59)
                 ), event.timezone)
-                if term_last < now_dt:
+                if term_last < time_machine_now_dt:
                     err = err or error_messages['some_subevent_ended']
                     delete(cp)
                     break
@@ -767,7 +773,7 @@ def _check_positions(event: Event, now_dt: datetime, positions: List[CartPositio
         if cp.seat:
             # Unlike quotas (which we blindly trust as long as the position is not expired), we check seats every
             # time, since we absolutely can not overbook a seat.
-            if not cp.seat.is_available(ignore_cart=cp, ignore_voucher_id=cp.voucher_id, sales_channel=sales_channel):
+            if not cp.seat.is_available(ignore_cart=cp, ignore_voucher_id=cp.voucher_id, sales_channel=sales_channel.identifier):
                 err = err or error_messages['seat_unavailable']
                 delete(cp)
                 continue
@@ -781,19 +787,19 @@ def _check_positions(event: Event, now_dt: datetime, positions: List[CartPositio
             delete(cp)
             continue
 
-        if cp.subevent and cp.item.pk in cp.subevent.item_overrides and not cp.subevent.item_overrides[cp.item.pk].is_available(now_dt):
+        if cp.subevent and cp.item.pk in cp.subevent.item_overrides and not cp.subevent.item_overrides[cp.item.pk].is_available(time_machine_now_dt):
             err = err or error_messages['unavailable']
             delete(cp)
             continue
 
         if cp.subevent and cp.variation and cp.variation.pk in cp.subevent.var_overrides and \
-                not cp.subevent.var_overrides[cp.variation.pk].is_available(now_dt):
+                not cp.subevent.var_overrides[cp.variation.pk].is_available(time_machine_now_dt):
             err = err or error_messages['unavailable']
             delete(cp)
             continue
 
         if cp.voucher:
-            if cp.voucher.valid_until and cp.voucher.valid_until < now_dt:
+            if cp.voucher.valid_until and cp.voucher.valid_until < time_machine_now_dt:
                 err = err or error_messages['voucher_expired']
                 delete(cp)
                 continue
@@ -865,7 +871,7 @@ def _check_positions(event: Event, now_dt: datetime, positions: List[CartPositio
     sorted_positions = [cp for cp in sorted_positions if cp.pk and cp.pk not in deleted_positions]
     discount_results = apply_discounts(
         event,
-        sales_channel,
+        sales_channel.identifier,
         [
             (cp.item_id, cp.subevent_id, cp.line_price_gross, bool(cp.addon_to), cp.is_bundled, cp.listed_price - cp.price_after_voucher)
             for cp in sorted_positions
@@ -877,6 +883,13 @@ def _check_positions(event: Event, now_dt: datetime, positions: List[CartPositio
             cp.discount = discount
             cp.save(update_fields=['price', 'discount'])
 
+    # After applying discounts, add-on positions might still have a reference to the *old* version of the
+    # parent position, which can screw up ordering later since the system sees inconsistent data.
+    by_id = {cp.pk: cp for cp in sorted_positions}
+    for cp in sorted_positions:
+        if cp.addon_to_id:
+            cp.addon_to = by_id[cp.addon_to_id]
+
     new_total = sum(cp.price for cp in sorted_positions)
     if old_total != new_total:
         err = err or error_messages['price_changed']
@@ -885,7 +898,7 @@ def _check_positions(event: Event, now_dt: datetime, positions: List[CartPositio
     for cp in sorted_positions:
         cp.expires = now_dt + timedelta(
             minutes=event.settings.get('reservation_time', as_type=int))
-        cp.save()
+        cp.save(update_fields=['expires'])
 
     if err:
         raise OrderError(err)
@@ -944,12 +957,11 @@ def _get_fees(positions: List[CartPosition], payment_requests: List[dict], addre
     return fees
 
 
-def _create_order(event: Event, email: str, positions: List[CartPosition], now_dt: datetime,
-                  payment_requests: List[dict], locale: str=None, address: InvoiceAddress=None,
-                  meta_info: dict=None, sales_channel: str='web', shown_total=None,
-                  customer=None, valid_if_pending=False):
+def _create_order(event: Event, *, email: str, positions: List[CartPosition], now_dt: datetime,
+                  payment_requests: List[dict], sales_channel: SalesChannel, locale: str=None,
+                  address: InvoiceAddress=None, meta_info: dict=None, shown_total=None,
+                  customer=None, valid_if_pending=False, api_meta: dict=None):
     payments = []
-    sales_channel = get_all_sales_channels()[sales_channel]
 
     try:
         validate_memberships_in_order(customer, positions, event, lock=True, testmode=event.testmode)
@@ -971,10 +983,11 @@ def _create_order(event: Event, email: str, positions: List[CartPosition], now_d
         datetime=now_dt,
         locale=get_language_without_region(locale),
         total=total,
-        testmode=True if sales_channel.testmode_supported and event.testmode else False,
+        testmode=True if sales_channel.type_instance.testmode_supported and event.testmode else False,
         meta_info=json.dumps(meta_info or {}),
+        api_meta=api_meta or {},
         require_approval=require_approval,
-        sales_channel=sales_channel.identifier,
+        sales_channel=sales_channel,
         customer=customer,
         valid_if_pending=valid_if_pending,
     )
@@ -1046,7 +1059,11 @@ def _order_placed_email(event: Event, order: Order, email_template, subject_temp
             log_entry,
             invoices=[invoice] if invoice and event.settings.invoice_email_attachment else [],
             attach_tickets=True,
-            attach_ical=event.settings.mail_attach_ical and (not event.settings.mail_attach_ical_paid_only or is_free),
+            attach_ical=event.settings.mail_attach_ical and (
+                not event.settings.mail_attach_ical_paid_only or
+                is_free or
+                order.valid_if_pending
+            ),
             attach_other_files=[a for a in [
                 event.settings.get('mail_attachment_new_order', as_type=str, default='')[len('file://'):]
             ] if a],
@@ -1065,7 +1082,11 @@ def _order_placed_email_attendee(event: Event, order: Order, position: OrderPosi
             log_entry,
             invoices=[],
             attach_tickets=True,
-            attach_ical=event.settings.mail_attach_ical and (not event.settings.mail_attach_ical_paid_only or is_free),
+            attach_ical=event.settings.mail_attach_ical and (
+                not event.settings.mail_attach_ical_paid_only or
+                is_free or
+                order.valid_if_pending
+            ),
             attach_other_files=[a for a in [
                 event.settings.get('mail_attachment_new_order', as_type=str, default='')[len('file://'):]
             ] if a],
@@ -1076,7 +1097,7 @@ def _order_placed_email_attendee(event: Event, order: Order, position: OrderPosi
 
 def _perform_order(event: Event, payment_requests: List[dict], position_ids: List[str],
                    email: str, locale: str, address: int, meta_info: dict=None, sales_channel: str='web',
-                   shown_total=None, customer=None):
+                   shown_total=None, customer=None, api_meta: dict=None):
     for p in payment_requests:
         p['pprov'] = event.get_payment_providers(cached=True)[p['provider']]
         if not p['pprov']:
@@ -1084,6 +1105,11 @@ def _perform_order(event: Event, payment_requests: List[dict], position_ids: Lis
 
     if customer:
         customer = event.organizer.customers.get(pk=customer)
+
+    try:
+        sales_channel = event.organizer.sales_channels.get(identifier=sales_channel)
+    except SalesChannel.DoesNotExist:
+        raise OrderError("Invalid sales channel.")
 
     if email == settings.PRETIX_EMAIL_NONE_VALUE:
         email = None
@@ -1109,6 +1135,9 @@ def _perform_order(event: Event, payment_requests: List[dict], position_ids: Lis
     ).filter(
         id__in=position_ids, event=event
     )
+
+    if shown_total is not None and Decimal(shown_total) > Decimal("0.00") and event.currency == "XXX":
+        raise OrderError(error_messages['currency_XXX'])
 
     validate_order.send(
         event,
@@ -1139,28 +1168,42 @@ def _perform_order(event: Event, payment_requests: List[dict], position_ids: Lis
     warnings = []
     any_payment_failed = False
 
-    now_dt = now()
+    real_now_dt = now()
+    time_machine_now_dt = time_machine_now(real_now_dt)
     err_out = None
     with transaction.atomic(durable=True):
         positions = list(
             positions.select_related('item', 'variation', 'subevent', 'seat', 'addon_to').prefetch_related('addons')
         )
-        positions.sort(key=lambda k: position_ids.index(k.pk))
+        positions.sort(key=lambda c: c.sort_key)
         if len(positions) == 0:
             raise OrderError(error_messages['empty'])
         if len(position_ids) != len(positions):
             raise OrderError(error_messages['internal'])
         try:
-            _check_positions(event, now_dt, positions, address=addr, sales_channel=sales_channel, customer=customer)
+            _check_positions(event, real_now_dt, time_machine_now_dt, positions,
+                             address=addr, sales_channel=sales_channel, customer=customer)
         except OrderError as e:
             err_out = e  # Don't raise directly to make sure transaction is committed, as it might have deleted things
         else:
             if 'sleep-after-quota-check' in debugflags_var.get():
                 sleep(2)
 
-            order, payment_objs = _create_order(event, email, positions, now_dt, payment_requests,
-                                                locale=locale, address=addr, meta_info=meta_info, sales_channel=sales_channel,
-                                                shown_total=shown_total, customer=customer, valid_if_pending=valid_if_pending)
+            order, payment_objs = _create_order(
+                event,
+                email=email,
+                positions=positions,
+                now_dt=real_now_dt,
+                payment_requests=payment_requests,
+                locale=locale,
+                address=addr,
+                meta_info=meta_info,
+                sales_channel=sales_channel,
+                shown_total=shown_total,
+                customer=customer,
+                valid_if_pending=valid_if_pending,
+                api_meta=api_meta,
+            )
 
             try:
                 for p in payment_objs:
@@ -1244,7 +1287,7 @@ def _perform_order(event: Event, payment_requests: List[dict], position_ids: Lis
             email_attendees_template = event.settings.mail_text_order_placed_attendee
             subject_attendees_template = event.settings.mail_subject_order_placed_attendee
 
-        if sales_channel in event.settings.mail_sales_channel_placed_paid:
+        if sales_channel.identifier in event.settings.mail_sales_channel_placed_paid:
             _order_placed_email(event, order, email_template, subject_template, log_entry, invoice, payment_objs,
                                 is_free=free_order_flow)
             if email_attendees:
@@ -1396,7 +1439,7 @@ def send_download_reminders(sender, **kwargs):
         if days is None:
             continue
 
-        if o.sales_channel not in event.settings.mail_sales_channel_download_reminder:
+        if o.sales_channel.identifier not in event.settings.mail_sales_channel_download_reminder:
             continue
 
         reminder_date = (o.first_date - timedelta(days=days)).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -1408,23 +1451,16 @@ def send_download_reminders(sender, **kwargs):
             if o.download_reminder_sent:
                 # Race condition
                 continue
-            if not all([r for rr, r in allow_ticket_download.send(event, order=o)]):
+            positions = list(o.positions_with_tickets)
+            if not positions:
                 continue
 
             if not o.ticket_download_available:
                 continue
-            positions = o.positions.select_related('item')
 
             if o.status != Order.STATUS_PAID:
                 if o.status != Order.STATUS_PENDING or o.require_approval or (not o.valid_if_pending and not o.event.settings.ticket_download_pending):
                     continue
-            send = False
-            for p in positions:
-                if p.generate_ticket:
-                    send = True
-                    break
-            if not send:
-                continue
 
             with language(o.locale, o.event.settings.region):
                 o.download_reminder_sent = True
@@ -1442,10 +1478,7 @@ def send_download_reminders(sender, **kwargs):
                     logger.exception('Reminder email could not be sent')
 
                 if event.settings.mail_send_download_reminder_attendee:
-                    for p in o.positions.all():
-                        if not p.generate_ticket:
-                            continue
-
+                    for p in positions:
                         if p.subevent_id:
                             reminder_date = (p.subevent.date_from - timedelta(days=days)).replace(
                                 hour=0, minute=0, second=0, microsecond=0
@@ -1688,16 +1721,17 @@ class OrderChangeManager:
 
             try:
                 new_rate = tax_rule.tax_rate_for(ia)
+                new_code = tax_rule.tax_code_for(ia)
             except TaxRule.SaleNotAllowed:
                 raise OrderError(error_messages['tax_rule_country_blocked'])
             # We use override_tax_rate to make sure .tax() doesn't get clever and re-adjusts the pricing itself
-            if new_rate != pos.tax_rate:
+            if new_rate != pos.tax_rate or new_code != pos.tax_code:
                 if keep == 'net':
                     new_tax = tax_rule.tax(pos.price - pos.tax_value, base_price_is='net', currency=self.event.currency,
-                                           override_tax_rate=new_rate)
+                                           override_tax_rate=new_rate, override_tax_code=new_code)
                 else:
                     new_tax = tax_rule.tax(pos.price, base_price_is='gross', currency=self.event.currency,
-                                           override_tax_rate=new_rate)
+                                           override_tax_rate=new_rate, override_tax_code=new_code)
                 self._totaldiff += new_tax.gross - pos.price
                 self._operations.append(self.PriceOperation(pos, new_tax, new_tax.gross - pos.price))
                 self._invoice_dirty = True
@@ -1908,9 +1942,13 @@ class OrderChangeManager:
             if not item.is_available() or (variation and not variation.is_available()):
                 raise OrderError(error_messages['unavailable'])
 
-            if self.order.sales_channel not in item.sales_channels or (
-                    variation and self.order.sales_channel not in variation.sales_channels):
-                raise OrderError(error_messages['unavailable'])
+            if not item.all_sales_channels:
+                if self.order.sales_channel.identifier not in (s.identifier for s in item.limit_sales_channels.all()):
+                    raise OrderError(error_messages['unavailable'])
+
+            if variation and not variation.all_sales_channels:
+                if self.order.sales_channel.identifier not in (s.identifier for s in variation.limit_sales_channels.all()):
+                    raise OrderError(error_messages['unavailable'])
 
             if subevent and item.pk in subevent.item_overrides and not subevent.item_overrides[item.pk].is_available():
                 raise OrderError(error_messages['not_for_sale'])
@@ -1998,6 +2036,23 @@ class OrderChangeManager:
                 if input_num < current_num:
                     for a in current_addons[cp][k][:current_num - input_num]:
                         if a.canceled:
+                            continue
+                        is_unavailable = (
+                            # If an item is no longer available due to time, it should usually also be no longer
+                            # user-removable, because e.g. the stock has already been ordered.
+                            # We always pass has_voucher=True because if a product now requires a voucher, it usually does
+                            # not mean it should be unremovable for others.
+                            # This also prevents accidental removal through the UI because a hidden product will no longer
+                            # be part of the input.
+                            (a.variation and a.variation.unavailability_reason(has_voucher=True, subevent=a.subevent))
+                            or (a.variation and not a.variation.all_sales_channels and not a.variation.limit_sales_channels.contains(self.order.sales_channel))
+                            or a.item.unavailability_reason(has_voucher=True, subevent=a.subevent)
+                            or (
+                                not item.all_sales_channels and
+                                not item.limit_sales_channels.contains(self.order.sales_channel)
+                            )
+                        )
+                        if is_unavailable:
                             continue
                         if a.checkins.filter(list__consider_tickets_used=True).exists():
                             raise OrderError(
@@ -2116,6 +2171,9 @@ class OrderChangeManager:
                     )
 
     def _check_paid_to_free(self):
+        if self.event.currency == 'XXX' and self.order.total + self._totaldiff > Decimal("0.00"):
+            raise OrderError(error_messages['currency_XXX'])
+
         if self.order.total == 0 and (self._totaldiff < 0 or (self.split_order and self.split_order.total > 0)) and not self.order.require_approval:
             if not self.order.fees.exists() and not self.order.positions.exists():
                 # The order is completely empty now, so we cancel it.
@@ -2247,6 +2305,7 @@ class OrderChangeManager:
                 op.position.price = op.price.gross
                 op.position.tax_rate = op.price.rate
                 op.position.tax_value = op.price.tax
+                op.position.tax_code = op.price.code
                 op.position.save()
             elif isinstance(op, self.TaxRuleOperation):
                 if isinstance(op.position, OrderPosition):
@@ -2343,7 +2402,7 @@ class OrderChangeManager:
             elif isinstance(op, self.AddOperation):
                 pos = OrderPosition.objects.create(
                     item=op.item, variation=op.variation, addon_to=op.addon_to,
-                    price=op.price.gross, order=self.order, tax_rate=op.price.rate,
+                    price=op.price.gross, order=self.order, tax_rate=op.price.rate, tax_code=op.price.code,
                     tax_value=op.price.tax, tax_rule=op.item.tax_rule,
                     positionid=nextposid, subevent=op.subevent, seat=op.seat,
                     used_membership=op.membership, valid_from=op.valid_from, valid_until=op.valid_until,
@@ -2366,6 +2425,8 @@ class OrderChangeManager:
             elif isinstance(op, self.SplitOperation):
                 split_positions.append(op.position)
             elif isinstance(op, self.RegenerateSecretOperation):
+                op.position.web_secret = generate_secret()
+                op.position.save(update_fields=["web_secret"])
                 assign_ticket_secret(
                     event=self.event, position=op.position, force_invalidate=True, save=True
                 )
@@ -2472,6 +2533,7 @@ class OrderChangeManager:
                 'new_order': split_order.code,
             })
             op.order = split_order
+            op.web_secret = generate_secret()
             assign_ticket_secret(
                 self.event, position=op, force_invalidate=True,
             )
@@ -2511,7 +2573,7 @@ class OrderChangeManager:
 
         remaining_total = sum([p.price for p in self.order.positions.all()]) + sum([f.value for f in self.order.fees.all()])
         offset_amount = min(max(0, self.completed_payment_sum - remaining_total), split_order.total)
-        if offset_amount >= split_order.total:
+        if offset_amount >= split_order.total and not split_order.require_approval:
             split_order.status = Order.STATUS_PAID
         else:
             split_order.status = Order.STATUS_PENDING
@@ -2682,6 +2744,7 @@ class OrderChangeManager:
 
         for p in self.order.positions.all():
             cp = CartPosition(
+                event=self.event,
                 item=p.item,
                 variation=p.variation,
                 attendee_name_parts=p.attendee_name_parts,
@@ -2702,16 +2765,23 @@ class OrderChangeManager:
                 positions_to_fake_cart[op.position].seat = op.seat
             elif isinstance(op, self.MembershipOperation):
                 positions_to_fake_cart[op.position].used_membership = op.membership
+            elif isinstance(op, self.ChangeValidFromOperation):
+                positions_to_fake_cart[op.position].override_valid_from = op.valid_from
+            elif isinstance(op, self.ChangeValidUntilOperation):
+                positions_to_fake_cart[op.position].override_valid_until = op.valid_until
             elif isinstance(op, self.CancelOperation) and op.position in positions_to_fake_cart:
                 fake_cart.remove(positions_to_fake_cart[op.position])
             elif isinstance(op, self.AddOperation):
                 cp = CartPosition(
+                    event=self.event,
                     item=op.item,
                     variation=op.variation,
                     used_membership=op.membership,
                     subevent=op.subevent,
                     seat=op.seat,
                 )
+                cp.override_valid_from = op.valid_from
+                cp.override_valid_until = op.valid_until
                 fake_cart.append(cp)
         try:
             validate_memberships_in_order(self.order.customer, fake_cart, self.event, lock=True, ignored_order=self.order, testmode=self.order.testmode)
@@ -2810,12 +2880,13 @@ class OrderChangeManager:
 @app.task(base=ProfiledEventTask, bind=True, max_retries=5, default_retry_delay=1, throws=(OrderError,))
 def perform_order(self, event: Event, payments: List[dict], positions: List[str],
                   email: str=None, locale: str=None, address: int=None, meta_info: dict=None,
-                  sales_channel: str='web', shown_total=None, customer=None):
-    with language(locale):
+                  sales_channel: str='web', shown_total=None, customer=None, override_now_dt: datetime=None,
+                  api_meta: dict=None):
+    with language(locale), time_machine_now_assigned(override_now_dt):
         try:
             try:
                 return _perform_order(event, payments, positions, email, locale, address, meta_info,
-                                      sales_channel, shown_total, customer)
+                                      sales_channel, shown_total, customer, api_meta)
             except LockTimeoutException:
                 self.retry()
         except (MaxRetriesExceededError, LockTimeoutException):
@@ -3043,14 +3114,34 @@ def change_payment_provider(order: Order, payment_provider, amount=None, new_pay
             }
         )
 
+    new_invoice_created = False
     if recreate_invoices:
+        # Lock to prevent duplicate invoice creation
+        order = Order.objects.select_for_update(of=OF_SELF).get(pk=order.pk)
+
         i = order.invoices.filter(is_cancellation=False).last()
-        if i and order.total != oldtotal and not i.canceled:
+        has_active_invoice = i and not i.canceled
+
+        if has_active_invoice and order.total != oldtotal:
             generate_cancellation(i)
             generate_invoice(order)
+            new_invoice_created = True
+
+        elif (not has_active_invoice or order.invoice_dirty) and invoice_qualified(order):
+            if order.event.settings.get('invoice_generate') == 'True' or (
+                order.event.settings.get('invoice_generate') == 'paid' and
+                new_payment.payment_provider.requires_invoice_immediately
+            ):
+                if has_active_invoice:
+                    generate_cancellation(i)
+                i = generate_invoice(order)
+                new_invoice_created = True
+                order.log_action('pretix.event.order.invoice.generated', data={
+                    'invoice': i.pk
+                })
 
     order.create_transactions()
-    return old_fee, new_fee, fee, new_payment
+    return old_fee, new_fee, fee, new_payment, new_invoice_created
 
 
 @receiver(order_paid, dispatch_uid="pretixbase_order_paid_giftcards")
@@ -3086,7 +3177,7 @@ def signal_listener_issue_memberships(sender: Event, order: Order, **kwargs):
     if order.status != Order.STATUS_PAID or not order.customer:
         return
     for p in order.positions.all():
-        if p.item.grant_membership_type_id:
+        if p.item.grant_membership_type_id and not p.granted_memberships.exists():
             create_membership(order.customer, p)
 
 

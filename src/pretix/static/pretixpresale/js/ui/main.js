@@ -78,7 +78,9 @@ var form_handlers = function (el) {
         }
         if ($(this).is('[data-max]')) {
             opts["maxDate"] = $(this).attr("data-max");
-            opts["viewDate"] = $(this).attr("data-max");
+            opts["viewDate"] = (opts.minDate &&   // if minDate and maxDate are set, use the one closer to now as viewDate
+                    Math.abs(+new Date(opts.minDate) - new Date()) < Math.abs(+new Date(opts.maxDate) - new Date())
+            ) ? opts.minDate : opts.maxDate;
         }
         $(this).datetimepicker(opts);
         if ($(this).parent().is('.splitdatetimerow')) {
@@ -123,7 +125,7 @@ var form_handlers = function (el) {
         var controls = document.getElementById(this.getAttribute("data-controls"));
         var currentValue = parseFloat(controls.value);
         controls.value = Math.max(controls.min, Math.min(controls.max || Number.MAX_SAFE_INTEGER, (currentValue || 0) + step));
-        controls.dispatchEvent(new Event("change"));
+        controls.dispatchEvent(new Event("change", { bubbles: true }));
     });
     el.find(".btn-checkbox input").on("change", function (e) {
         $(this).closest(".btn-checkbox")
@@ -149,11 +151,41 @@ var form_handlers = function (el) {
         ).find("canvas").attr("role", "img").attr("aria-label", this.getAttribute("data-desc"));
     });
 
-    el.find("input[data-exclusive-prefix]").each(function () {
-        var $others = $("input[name^=" + $(this).attr("data-exclusive-prefix") + "]:not([name=" + $(this).attr("name") + "])");
-        $(this).on('click change', function () {
-            if ($(this).prop('checked')) {
-                $others.prop('checked', false);
+
+    el.find("fieldset[data-addon-max-count]").each(function() {
+        // usually addons are only allowed once one per item
+        var multipleAllowed = this.hasAttribute("data-addon-multi-allowed");
+        var $inputs = $(".availability-box input", this);
+        var max = parseInt(this.getAttribute("data-addon-max-count"));
+        var desc = $(".addon-count-desc", this).text().trim();
+        this.addEventListener("change", function (e) {
+            var variations = e.target.closest(".variations");
+            if (variations && !multipleAllowed && e.target.checked) {
+                // uncheck all other checkboxes inside this variations
+                $(".availability-box input:checked", variations).not(e.target).prop("checked", false).trigger("change");
+            }
+
+            if (max === 1) {
+                if (e.target.checked) {
+                    $inputs.filter(":checked").not(e.target).prop("checked", false).trigger("change");
+                }
+                return;
+            }
+            var total = $inputs.toArray().reduce(function(a, e) {
+                return a + (e.type == "checkbox" ? (e.checked ? parseInt(e.value) : 0) : parseInt(e.value) || 0);
+            }, 0);
+            if (total > max) {
+                if (e.target.type == "checkbox") {
+                    e.target.checked = false;
+                } else {
+                    e.target.value = e.target.value - (total - max);
+                }
+                $(e.target).trigger("change").closest(".availability-box").tooltip({
+                    "title": desc,
+                }).tooltip('show');
+                e.preventDefault();
+            } else {
+                $(".availability-box", this).tooltip('destroy')
             }
         });
     });
@@ -211,6 +243,11 @@ function setup_basics(el) {
             $($(this).attr("data-target")).collapse('show');
         }
     });
+    $("fieldset.accordion-panel > legend input[type=radio]").change(function() {
+        $(this).closest("fieldset").siblings("fieldset").prop('disabled', true).children('.panel-body').slideUp();
+        $(this).closest("fieldset").prop('disabled', false).children('.panel-body').slideDown();
+    }).filter(':not(:checked)').each(function() { $(this).closest("fieldset").prop('disabled', true).children('.panel-body').hide(); });
+
     el.find(".js-only").removeClass("js-only");
     el.find(".js-hidden").hide();
 
@@ -348,36 +385,33 @@ $(function () {
         " #id_city, #id_country, #id_state").change(function () {
         if (copy_to_first_ticket) {
             var $first_ticket_form = $(".questions-form").first().find("[data-addonidx=0]");
-            $first_ticket_form.find("input[id*=attendee_email]").val($("#id_email").val());
-            $first_ticket_form.find("input[id$=company]").val($("#id_company").val());
-            $first_ticket_form.find("textarea[id$=street]").val($("#id_street").val());
-            $first_ticket_form.find("input[id$=zipcode]").val($("#id_zipcode").val());
-            $first_ticket_form.find("input[id$=city]").val($("#id_city").val());
-
-            $first_ticket_form.find("select[id$=state]").val($("#id_state").val());
-            if ($first_ticket_form.find("select[id$=country]").val() !== $("#id_country").val()) {
-                $first_ticket_form.find("select[id$=country]").val($("#id_country").val()).trigger('change');
+            $first_ticket_form.find("[id$=" + this.id.substring(3) + "]").val(this.value);
+            if (this.placeholder) {
+                $first_ticket_form.find("[placeholder='" + this.placeholder + "']").val(this.value);
             }
-            $first_ticket_form.find("[id*=attendee_name_parts]").each(function () {
-                var parts = $(this).attr("id").split("_");
-                var num = parts[parts.length - 1];
-                $(this).val($("#id_name_parts_" + num).val());
-            });
+            var label = $("label[for=" + this.id +"]").first().contents().filter(function () {
+                return this.nodeType != Node.ELEMENT_NODE || !this.classList.contains("sr-only");
+            }).text().trim();
+            if (label) {
+                // match to placeholder and label
+                $first_ticket_form.find("[placeholder='" + label + "']").val(this.value);
+                var v = this.value;
+                $first_ticket_form.find("label").each(function() {
+                    var text = $(this).first().contents().filter(function () {
+                        return this.nodeType != Node.ELEMENT_NODE || !this.classList.contains("sr-only");
+                    }).text().trim();
+                    if (text == label) {
+                        $("#" + this.getAttribute("for")).val(v);
+                    }
+                });
+            }
         }
-    });
+    }).trigger("change");
     attendee_address_fields.change(function () {
         copy_to_first_ticket = false;
     });
     questions_init_profiles($("body"));
 
-    // Subevent choice
-    if ($(".subevent-toggle").length) {
-        $(".subevent-list").hide();
-        $(".subevent-toggle").show().click(function () {
-            $(".subevent-list").slideToggle(300);
-            $(this).slideToggle(300).attr("aria-expanded", true);
-        });
-    }
     if (sessionStorage) {
         $("[data-save-scrollpos]").on("click submit", function () {
             sessionStorage.setItem('scrollpos', window.scrollY);
@@ -422,10 +456,26 @@ $(function () {
         .on("change mouseup keyup", update_cart_form);
 
     $(".table-calendar td.has-events").click(function () {
-        var $tr = $(this).closest(".table-calendar").find(".selected-day");
-        $tr.find("td").html($(this).find(".events").clone());
-        $tr.find("td").prepend($("<h3>").text($(this).attr("data-date")));
-        $tr.removeClass("hidden");
+        var $grid = $(this).closest("[role='grid']");
+        $grid.find("[aria-selected]").attr("aria-selected", false);
+        $(this).attr("aria-selected", true);
+        $("#selected-day")
+            .html($(this).find(".events").clone())
+            .prepend($("<h3>").text($(this).attr("data-date")));
+    }).each(function() {
+        // check all events classes and set the "winning" class for the availability of the day-label on mobile
+        var $dayLabel = $('.day-label', this);
+        if ($('.available.low', this).length == $('.available', this).length) {
+            $dayLabel.addClass('low');
+        }
+        var classes = ['available', 'waitinglist', 'soon', 'reserved', 'soldout', 'continued', 'over'];
+        for (var c of classes) {
+            if ($('.'+c, this).length) {
+                $dayLabel.addClass(c);
+                // CAREFUL: „return“ as „break“ is not supported before ES2015 and breaks e.g. on iOS 15
+                return;
+            }
+        }
     });
 
     $(".print-this-page").on("click", function (e) {
@@ -478,65 +528,6 @@ $(function () {
         update();
         dependency.closest('.form-group, form').find('input[name=' + dependency.attr("name") + '], select[name=' + dependency.attr("name") + ']').on("change", update);
         dependency.closest('.form-group, form').find('input[name=' + dependency.attr("name") + ']').on("dp.change", update);
-    });
-
-    $("input[name$=vat_id][data-countries-with-vat-id]").each(function () {
-        var dependent = $(this),
-            dependency_country = $(this).closest(".panel-body, form").find('select[name$=country]'),
-            dependency_id_is_business_1 = $(this).closest(".panel-body, form").find('input[id$=id_is_business_1]'),
-            update = function (ev) {
-                if (dependency_id_is_business_1.length && !dependency_id_is_business_1.prop("checked")) {
-                    dependent.closest(".form-group").hide();
-                } else if (dependent.attr('data-countries-with-vat-id').split(',').includes(dependency_country.val())) {
-                    dependent.closest(".form-group").show();
-                } else {
-                    dependent.closest(".form-group").hide();
-                }
-            };
-        update();
-        dependency_country.on("change", update);
-        dependency_id_is_business_1.on("change", update);
-    });
-
-    $("select[name$=state]").each(function () {
-        var dependent = $(this),
-            counter = 0,
-            dependency = $(this).closest(".panel-body, form").find('select[name$=country]'),
-            update = function (ev) {
-                counter++;
-                var curCounter = counter;
-                dependent.prop("disabled", true);
-                dependency.closest(".form-group").find("label").prepend("<span class='fa fa-cog fa-spin'></span> ");
-                $.getJSON('/js_helpers/states/?country=' + dependency.val(), function (data) {
-                    if (counter > curCounter) {
-                        return;  // Lost race
-                    }
-                    var selected_value = dependent.prop("data-selected-value");
-                    dependent.find("option").filter(function (t) {return !!$(this).attr("value")}).remove();
-                    if (data.data.length > 0) {
-                        $.each(data.data, function (k, s) {
-                            var o = $("<option>").attr("value", s.code).text(s.name);
-                            if (s.code == selected_value || (selected_value && selected_value.indexOf && selected_value.indexOf(s.code) > -1)) {
-                                o.prop("selected", true);
-                            }
-                            dependent.append(o);
-                        });
-                        dependent.closest(".form-group").show();
-                        dependent.prop('required', dependency.prop("required"));
-                    } else {
-                        dependent.closest(".form-group").hide();
-                        dependent.prop("required", false);
-                    }
-                    dependent.prop("disabled", false);
-                    dependency.closest(".form-group").find("label .fa-spin").remove();
-                });
-            };
-        if (dependent.find("option").length === 1) {
-            dependent.closest(".form-group").hide();
-        } else {
-            dependent.prop('required', dependency.prop("required"));
-        }
-        dependency.on("change", update);
     });
 
     form_handlers($("body"));

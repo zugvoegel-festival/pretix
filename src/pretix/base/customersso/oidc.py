@@ -24,7 +24,7 @@ import hashlib
 import logging
 import time
 from datetime import datetime
-from urllib.parse import urlencode, urljoin
+from urllib.parse import parse_qsl, urlencode, urljoin
 
 import jwt
 import requests
@@ -45,6 +45,8 @@ logger = logging.getLogger(__name__)
 This module contains utilities for implementing OpenID Connect for customer authentication both as a receiving party (RP)
 as well as an OpenID Provider (OP).
 """
+
+pretix_token_endpoint_auth_methods = ['client_secret_basic', 'client_secret_post']
 
 
 def _urljoin(base, path):
@@ -127,6 +129,21 @@ def oidc_validate_and_complete_config(config):
                         fields=", ".join(provider_config.get("claims_supported", []))
                     ))
 
+    if "token_endpoint_auth_methods_supported" in provider_config:
+        token_endpoint_auth_methods_supported = provider_config.get("token_endpoint_auth_methods_supported",
+                                                                    ["client_secret_basic"])
+        if not any(x in pretix_token_endpoint_auth_methods for x in token_endpoint_auth_methods_supported):
+            raise ValidationError(
+                _(f'No supported Token Endpoint Auth Methods supported: {token_endpoint_auth_methods_supported}').format(
+                    token_endpoint_auth_methods_supported=", ".join(token_endpoint_auth_methods_supported)
+                )
+            )
+
+    if "query_parameters" in config and config["query_parameters"]:
+        config["query_parameters"] = urlencode(
+            parse_qsl(config["query_parameters"])
+        )
+
     config['provider_config'] = provider_config
     return config
 
@@ -142,11 +159,27 @@ def oidc_authorize_url(provider, state, redirect_uri):
         'state': state,
         'redirect_uri': redirect_uri,
     }
+
+    if "query_parameters" in provider.configuration and provider.configuration["query_parameters"]:
+        params.update(parse_qsl(provider.configuration["query_parameters"]))
+
     return endpoint + '?' + urlencode(params)
 
 
 def oidc_validate_authorization(provider, code, redirect_uri):
     endpoint = provider.configuration['provider_config']['token_endpoint']
+
+    # Wall of shame and RFC ignorant IDPs
+    if endpoint == 'https://www.linkedin.com/oauth/v2/accessToken':
+        token_endpoint_auth_method = 'client_secret_post'
+    else:
+        token_endpoint_auth_methods = provider.configuration['provider_config'].get(
+            'token_endpoint_auth_methods_supported', ['client_secret_basic']
+        )
+        token_endpoint_auth_method = [
+            x for x in pretix_token_endpoint_auth_methods if x in token_endpoint_auth_methods
+        ][0]
+
     params = {
         # https://datatracker.ietf.org/doc/html/rfc6749#section-4.1.3
         # https://openid.net/specs/openid-connect-core-1_0.html#TokenEndpoint
@@ -154,6 +187,11 @@ def oidc_validate_authorization(provider, code, redirect_uri):
         'code': code,
         'redirect_uri': redirect_uri,
     }
+
+    if token_endpoint_auth_method == 'client_secret_post':
+        params['client_id'] = provider.configuration['client_id']
+        params['client_secret'] = provider.configuration['client_secret']
+
     try:
         resp = requests.post(
             endpoint,
@@ -161,7 +199,10 @@ def oidc_validate_authorization(provider, code, redirect_uri):
             headers={
                 'Accept': 'application/json',
             },
-            auth=(provider.configuration['client_id'], provider.configuration['client_secret']),
+            auth=(
+                provider.configuration['client_id'],
+                provider.configuration['client_secret']
+            ) if token_endpoint_auth_method == 'client_secret_basic' else None,
         )
         resp.raise_for_status()
         data = resp.json()

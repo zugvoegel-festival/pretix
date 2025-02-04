@@ -1,4 +1,5 @@
 {% extends "pretixpresale/base.html" %}
+{% load urlreplace %}
 {% load i18n %}
 {% load static %}
 {% load thumb %}
@@ -18,6 +19,9 @@
     <meta property="og:type" content="website" />
     {% if social_image %}
         <meta property="og:image" content="{{ social_image }}" />
+    {% endif %}
+    {% if event.settings.google_site_verification %}
+        <meta name="google-site-verification" content="{{ event.settings.google_site_verification }}" />
     {% endif %}
     {{ block.super }}
 {% endblock %}
@@ -41,7 +45,7 @@
                         <nav class="locales" aria-label="{% trans "select language" %}">
                             <ul>
                             {% for l in languages %}
-                                <li><a href="{% url "presale:locale.set" %}?locale={{ l.code }}&next={{ request.path }}{% if request.META.QUERY_STRING %}%3F{{ request.META.QUERY_STRING|urlencode }}{% endif %}" class="{% if l.code == request.LANGUAGE_CODE %}active{% endif %}" rel="nofollow" lang="{{ l.code }}" hreflang="{{ l.code }}"
+                                <li><a href="{% url "presale:locale.set" %}?locale={{ l.code }}&next={{ request.path }}{% if request.META.QUERY_STRING %}%3F{% url_replace request "locale" "" %}{% endif %}" class="{% if l.code == request.LANGUAGE_CODE %}active{% endif %}" rel="nofollow" lang="{{ l.code }}" hreflang="{{ l.code }}"
                                     aria-label="{% language l.code %}{% blocktrans trimmed with language=l.name_local %}
                                         Website in {{ language }}
                                         {% endblocktrans %}{% endlanguage %}">{{ l.name_local }}</a></li>
@@ -68,19 +72,27 @@
 {% block page %}
     <div class="page-header{% if event_logo %} pager-header-with-logo{% endif %}{% if event_logo and event_logo_image_large %} logo-large{% endif %}">
         <div class="{% if not event_logo or not event_logo_image_large %}pull-left flip{% endif %}">
+            {% if event_logo and not event_logo_show_title %}
+                <h1 class="sr-only">
+                    {{ event.name }}
+                    {% if request.event.settings.show_dates_on_frontpage and not event.has_subevents %}
+                        <small>{{ event.get_date_range_display_as_html }}</small>
+                    {% endif %}
+                </h1>
+            {% endif %}
             {% if event_logo and event_logo_image_large %}
                 <a href="{% eventurl event "presale:event.index" cart_namespace=cart_namespace|default_if_none:"" %}"
-                   aria-label="{% trans 'Homepage' %}" title="{% trans 'Homepage' %}">
-                    <img src="{{ event_logo|thumb:'1170x5000' }}" alt="" class="event-logo" />
+                   title="{% trans 'Homepage' %}">
+                    <img src="{{ event_logo|thumb:'1170x5000' }}" alt="{{ event.name }}" class="event-logo" />
                 </a>
             {% elif event_logo %}
                 <a href="{% eventurl event "presale:event.index" cart_namespace=cart_namespace|default_if_none:"" %}"
-                   aria-label="{% trans 'Homepage' %}" title="{% trans 'Homepage' %}">
-                    <img src="{{ event_logo|thumb:'5000x120' }}" alt="" class="event-logo" />
+                   title="{% trans 'Homepage' %}">
+                    <img src="{{ event_logo|thumb:'5000x120' }}" alt="{{ event.name }}" class="event-logo" />
                 </a>
             {% else %}
                 <h1>
-                    <a href="{% eventurl event "presale:event.index" cart_namespace=cart_namespace|default_if_none:"" %}" aria-label="{% trans 'Homepage' %}">{{ event.name }}</a>
+                    <a href="{% eventurl event "presale:event.index" cart_namespace=cart_namespace|default_if_none:"" %}">{{ event.name }}</a>
                     {% if request.event.settings.show_dates_on_frontpage and not event.has_subevents %}
                         <small>{{ event.get_date_range_display_as_html }}</small>
                     {% endif %}
@@ -109,11 +121,42 @@
         <div class="clearfix"></div>
     </div>
     {% if request.event.testmode %}
-        {% if request.sales_channel.testmode_supported %}
+        {% if request.sales_channel.type_instance.testmode_supported %}
             <div class="alert alert-warning">
-                <p><strong><span class="sr-only">{% trans "Warning" context "alert-messages" %}:</span>
-                    {% trans "This ticket shop is currently in test mode. Please do not perform any real purchases as your order might be deleted without notice." %}
+                <p><strong>
+                    <span class="sr-only">{% trans "Warning" context "alert-messages" %}:</span>
+                    {% trans "This ticket shop is currently in test mode." %}
                 </strong></p>
+                <p>
+                    {% trans "Please do not perform any real purchases as your order might be deleted without notice." %}
+                </p>
+                {% if request.now_dt_is_fake %}
+                    <p>
+                        {% blocktrans trimmed with datetime=request.now_dt|date:"SHORT_DATETIME_FORMAT" %}
+                        You are currently using the time machine. The ticket shop is rendered as if it were {{ datetime }}.
+                        {% endblocktrans %}
+                        <a href="{% eventurl event "presale:event.timemachine" %}"><span class="fa fa-clock-o" aria-hidden="true"></span>{% trans "Change" %}</a>
+                    </p>
+                {% elif request.user.is_authenticated or request.event_access_user.is_authenticated %}
+                    <p>
+                        {% eventurl event "presale:event.timemachine" as time_machine_link %}
+                        {% blocktrans trimmed with time_machine_link=time_machine_link %}
+                            To view your shop at different points in time, you can enable the
+                            <a href="{{ time_machine_link }}"><span class="fa fa-clock-o" aria-hidden="true"></span>time machine</a>.
+                        {% endblocktrans %}
+                    </p>
+                {% elif request.event_domain or request.organizer_domain %}
+                    <p>
+                        {% absmainurl "control:event.transfer_session" event=event.slug organizer=event.organizer.slug as transfer_session_link %}
+                        {% eventurl event "presale:event.timemachine" as time_machine_link %}
+                        {% with time_machine_link_encoded=time_machine_link|urlencode %}
+                            {% blocktrans trimmed with time_machine_link=transfer_session_link|add:"?next="|add:time_machine_link_encoded %}
+                                To view your shop at different points in time, you can enable the
+                                <a href="{{ time_machine_link }}"><span class="fa fa-clock-o" aria-hidden="true"></span>time machine</a>.
+                            {% endblocktrans %}
+                        {% endwith %}
+                    </p>
+                {% endif %}
             </div>
         {% else %}
             <div class="alert alert-danger">
@@ -122,6 +165,8 @@
                 </strong></p>
             </div>
         {% endif %}
+
+
     {% endif %}
     {% if messages %}
         {% for message in messages %}
@@ -150,11 +195,15 @@
         </div>
     {% endif %}
     {% if request.event.testmode %}
-        {% if request.sales_channel.testmode_supported %}
+        {% if request.sales_channel.type_instance.testmode_supported %}
             <div class="alert alert-testmode alert-warning">
-                <p><strong><span class="sr-only">{% trans "Warning" context "alert-messages" %}:</span>
-                    {% trans "This ticket shop is currently in test mode. Please do not perform any real purchases as your order might be deleted without notice." %}
+                <p><strong>
+                    <span class="sr-only">{% trans "Warning" context "alert-messages" %}:</span>
+                    {% trans "This ticket shop is currently in test mode." %}
                 </strong></p>
+                <p>
+                    {% trans "Please do not perform any real purchases as your order might be deleted without notice." %}
+                </p>
             </div>
         {% else %}
             <div class="alert alert-testmode alert-danger">

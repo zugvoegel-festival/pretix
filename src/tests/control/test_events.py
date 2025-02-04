@@ -47,7 +47,6 @@ from i18nfield.strings import LazyI18nString
 from tests.base import SoupTest, extract_form_fields
 
 from pretix.base.models import Event, LogEntry, Order, Organizer, Team, User
-from pretix.testutils.mock import mocker_context
 
 
 @pytest.fixture
@@ -300,6 +299,8 @@ class EventsTest(SoupTest):
         doc = self.get_doc('/control/event/%s/%s/settings/plugins' % (self.orga1.slug, self.event1.slug))
         self.assertIn("Stripe", doc.select(".form-plugins")[0].text)
         self.assertIn("Enable", doc.select("[name=\"plugin:pretix.plugins.stripe\"]")[0].text)
+        assert not doc.select("[name=\"plugin:tests.testdummyrestricted\"]")
+        assert not doc.select("[name=\"plugin:tests.testdummyhidden\"]")
 
         doc = self.post_doc('/control/event/%s/%s/settings/plugins' % (self.orga1.slug, self.event1.slug),
                             {'plugin:pretix.plugins.stripe': 'enable'})
@@ -308,6 +309,23 @@ class EventsTest(SoupTest):
         doc = self.post_doc('/control/event/%s/%s/settings/plugins' % (self.orga1.slug, self.event1.slug),
                             {'plugin:pretix.plugins.stripe': 'disable'})
         self.assertIn("Enable", doc.select("[name=\"plugin:pretix.plugins.stripe\"]")[0].text)
+
+        self.post_doc('/control/event/%s/%s/settings/plugins' % (self.orga1.slug, self.event1.slug),
+                      {'plugin:tests.testdummyhidden': 'enable'})
+        self.event1.refresh_from_db()
+        assert "testdummyhidden" not in self.event1.plugins
+
+        self.post_doc('/control/event/%s/%s/settings/plugins' % (self.orga1.slug, self.event1.slug),
+                      {'plugin:tests.testdummyrestricted': 'enable'})
+        self.event1.refresh_from_db()
+        assert "testdummyrestricted" not in self.event1.plugins
+
+        self.orga1.settings.allowed_restricted_plugins = ["tests.testdummyrestricted"]
+
+        self.post_doc('/control/event/%s/%s/settings/plugins' % (self.orga1.slug, self.event1.slug),
+                      {'plugin:tests.testdummyrestricted': 'enable'})
+        self.event1.refresh_from_db()
+        assert "testdummyrestricted" in self.event1.plugins
 
     def test_testmode_enable(self):
         self.event1.testmode = False
@@ -323,13 +341,15 @@ class EventsTest(SoupTest):
                 code='FOO', event=self.event1, email='dummy@dummy.test',
                 status=Order.STATUS_PENDING,
                 datetime=now(), expires=now() + datetime.timedelta(days=10),
-                total=14, locale='en', testmode=True
+                total=14, locale='en', testmode=True,
+                sales_channel=self.event1.organizer.sales_channels.get(identifier="web"),
             )
             o2 = Order.objects.create(
                 code='FOO2', event=self.event1, email='dummy@dummy.test',
                 status=Order.STATUS_PENDING,
                 datetime=now(), expires=now() + datetime.timedelta(days=10),
-                total=14, locale='en'
+                total=14, locale='en',
+                sales_channel=self.event1.organizer.sales_channels.get(identifier="web"),
             )
             self.event1.testmode = True
             self.event1.save()
@@ -347,13 +367,15 @@ class EventsTest(SoupTest):
                 code='FOO', event=self.event1, email='dummy@dummy.test',
                 status=Order.STATUS_PENDING,
                 datetime=now(), expires=now() + datetime.timedelta(days=10),
-                total=14, locale='en', testmode=True
+                total=14, locale='en', testmode=True,
+                sales_channel=self.event1.organizer.sales_channels.get(identifier="web"),
             )
             o2 = Order.objects.create(
                 code='FOO2', event=self.event1, email='dummy@dummy.test',
                 status=Order.STATUS_PENDING,
                 datetime=now(), expires=now() + datetime.timedelta(days=10),
-                total=14, locale='en'
+                total=14, locale='en',
+                sales_channel=self.event1.organizer.sales_channels.get(identifier="web"),
             )
             self.event1.testmode = True
             self.event1.save()
@@ -476,18 +498,14 @@ class EventsTest(SoupTest):
         assert self.event1.settings.get('invoice_address_required', as_type=bool)
 
     def test_display_settings(self):
-        with mocker_context() as mocker:
-            mocked = mocker.patch('pretix.presale.style.regenerate_css.apply_async')
-
-            doc = self.get_doc('/control/event/%s/%s/settings/' % (self.orga1.slug, self.event1.slug))
-            data = extract_form_fields(doc.select("form")[0])
-            data['settings-primary_color'] = '#000000'
-            doc = self.post_doc('/control/event/%s/%s/settings/' % (self.orga1.slug, self.event1.slug),
-                                data, follow=True)
-            assert doc.select('.alert-success')
-            self.event1.settings.flush()
-            assert self.event1.settings.get('primary_color') == '#000000'
-            mocked.assert_any_call(args=(self.event1.pk,))
+        doc = self.get_doc('/control/event/%s/%s/settings/' % (self.orga1.slug, self.event1.slug))
+        data = extract_form_fields(doc.select("form")[0])
+        data['settings-primary_color'] = '#000000'
+        doc = self.post_doc('/control/event/%s/%s/settings/' % (self.orga1.slug, self.event1.slug),
+                            data, follow=True)
+        assert doc.select('.alert-success')
+        self.event1.settings.flush()
+        assert self.event1.settings.get('primary_color') == '#000000'
 
     def test_display_settings_do_not_override_parent(self):
         self.orga1.settings.primary_color = '#000000'
@@ -745,6 +763,7 @@ class EventsTest(SoupTest):
             'basics-location_1': 'Hamburg',
             'basics-currency': 'EUR',
             'basics-tax_rate': '',
+            'basics-no_taxes': 'on',
             'basics-locale': 'en',
             'basics-timezone': 'Europe/Berlin',
             'basics-presale_start': '2016-11-01 10:00:00',
@@ -774,6 +793,7 @@ class EventsTest(SoupTest):
             'basics-location_1': 'Hamburg',
             'basics-currency': 'EUR',
             'basics-tax_rate': '',
+            'basics-no_taxes': 'on',
             'basics-locale': 'en',
             'basics-timezone': 'Europe/Berlin',
             'basics-presale_start_0': '2016-11-01',
@@ -870,6 +890,7 @@ class EventsTest(SoupTest):
             'basics-location_1': 'Hamburg',
             'basics-currency': 'EUR',
             'basics-tax_rate': '',
+            'basics-no_taxes': 'on',
             'basics-locale': 'en',
             'basics-timezone': 'Europe/Berlin',
             'basics-presale_start_0': '2016-11-01',
@@ -1055,6 +1076,7 @@ class EventsTest(SoupTest):
             'basics-location_0': 'Hamburg',
             'basics-currency': 'EUR',
             'basics-tax_rate': '',
+            'basics-no_taxes': 'on',
             'basics-locale': 'en',
             'basics-timezone': 'UTC',
             'basics-presale_start_0': '',
@@ -1103,6 +1125,7 @@ class EventsTest(SoupTest):
             'basics-location_0': 'Hamburg',
             'basics-currency': 'EUR',
             'basics-tax_rate': '',
+            'basics-no_taxes': 'on',
             'basics-locale': 'en',
             'basics-timezone': 'UTC',
             'basics-presale_start_0': '',
@@ -1153,6 +1176,7 @@ class EventsTest(SoupTest):
             'basics-location_0': 'Hamburg',
             'basics-currency': 'EUR',
             'basics-tax_rate': '',
+            'basics-no_taxes': 'on',
             'basics-locale': 'en',
             'basics-timezone': 'Europe/Berlin',
             'basics-presale_start_0': '2016-11-01',
@@ -1182,6 +1206,7 @@ class EventsTest(SoupTest):
             'basics-location_0': 'Hamburg',
             'basics-currency': '$',
             'basics-tax_rate': '',
+            'basics-no_taxes': 'on',
             'basics-locale': 'en',
             'basics-timezone': 'Europe/Berlin',
             'basics-presale_start_0': '2016-11-01',
@@ -1211,6 +1236,7 @@ class EventsTest(SoupTest):
             'basics-location_0': 'Hamburg',
             'basics-currency': 'ASD',
             'basics-tax_rate': '',
+            'basics-no_taxes': 'on',
             'basics-locale': 'en',
             'basics-timezone': 'Europe/Berlin',
             'basics-presale_start_0': '2016-11-01',
@@ -1272,12 +1298,14 @@ class EventDeletionTest(SoupTest):
             assert self.orga1.events.exists()
 
     def test_delete_orders(self):
-        Order.objects.create(
-            code='FOO', event=self.event1, email='dummy@dummy.test',
-            status=Order.STATUS_PENDING,
-            datetime=now(), expires=now(),
-            total=14, locale='en'
-        )
+        with scopes_disabled():
+            Order.objects.create(
+                code='FOO', event=self.event1, email='dummy@dummy.test',
+                status=Order.STATUS_PENDING,
+                datetime=now(), expires=now(),
+                total=14, locale='en',
+                sales_channel=self.event1.organizer.sales_channels.get(identifier="web"),
+            )
         self.post_doc('/control/event/ccc/30c3/delete/', {
             'user_pw': 'dummy',
             'slug': '30c3'

@@ -35,6 +35,7 @@
 
 import json
 from collections import OrderedDict, namedtuple
+from itertools import groupby
 from json.decoder import JSONDecodeError
 
 from django.contrib import messages
@@ -83,7 +84,6 @@ from pretix.control.permissions import (
 from pretix.control.signals import item_forms, item_formsets
 from pretix.helpers.models import modelcopy
 
-from ...base.channels import get_all_sales_channels
 from ...helpers.compat import CompatDeleteView
 from . import ChartContainingView, CreateView, PaginationMixin, UpdateView
 
@@ -103,16 +103,18 @@ class ItemList(ListView):
     def get_queryset(self):
         return Item.objects.filter(
             event=self.request.event
-        ).annotate(
+        ).select_related("tax_rule").annotate(
             var_count=Count('variations')
-        ).prefetch_related("category").order_by(
+        ).prefetch_related("category", "limit_sales_channels").order_by(
             F('category__position').asc(nulls_first=True),
             'category', 'position'
         )
 
     def get_context_data(self, **kwargs):
         ctx = super().get_context_data(**kwargs)
-        ctx['sales_channels'] = get_all_sales_channels()
+        ctx['sales_channels'] = self.request.organizer.sales_channels.all()
+        items_by_category = {cat: list(items) for cat, items in groupby(ctx['items'], lambda item: item.category)}
+        ctx['cat_list'] = [(cat, items_by_category.get(cat, [])) for cat in [None, *self.request.event.categories.all()]]
         return ctx
 
 
@@ -169,7 +171,7 @@ def item_move_down(request, organizer, event, item):
 @transaction.atomic
 @event_permission_required("can_change_items")
 @require_http_methods(["POST"])
-def reorder_items(request, organizer, event):
+def reorder_items(request, organizer, event, category):
     try:
         ids = json.loads(request.body.decode('utf-8'))['ids']
     except (JSONDecodeError, KeyError, ValueError):
@@ -180,23 +182,21 @@ def reorder_items(request, organizer, event):
     if len(input_items) != len(ids):
         raise Http404(_("Some of the provided object ids are invalid."))
 
-    item_categories = {i.category_id for i in input_items}
-    if len(item_categories) > 1:
-        raise Http404(_("You cannot reorder items spanning different categories."))
-
-    # get first and only category
-    item_category = next(iter(item_categories))
-    if len(input_items) != request.event.items.filter(category=item_category).count():
-        raise Http404(_("Not all objects have been selected."))
+    if int(category):
+        target_category = request.event.categories.get(id=category)
+    else:
+        target_category = None
 
     for i in input_items:
         pos = ids.index(str(i.pk))
-        if pos != i.position:  # Save unneccessary UPDATE queries
+        if pos != i.position or target_category != i.category:  # Save unneccessary UPDATE queries
             i.position = pos
-            i.save(update_fields=['position'])
+            i.category = target_category
+            i.save(update_fields=['position', 'category_id'])
             i.log_action(
                 'pretix.event.item.reordered', user=request.user, data={
                     'position': i,
+                    'category': target_category and target_category.pk,
                 }
             )
 
@@ -257,7 +257,7 @@ class CategoryUpdate(EventPermissionRequiredMixin, UpdateView):
         messages.success(self.request, _('Your changes have been saved.'))
         if form.has_changed():
             self.object.log_action(
-                'pretix.event.category.reordered', user=self.request.user, data={
+                'pretix.event.category.changed', user=self.request.user, data={
                     k: form.cleaned_data.get(k) for k in form.changed_data
                 }
             )
@@ -302,6 +302,8 @@ class CategoryCreate(EventPermissionRequiredMixin, CreateView):
             i = modelcopy(self.copy_from)
             i.pk = None
             kwargs['instance'] = i
+            kwargs.setdefault('initial', {})
+            kwargs['initial']['cross_selling_match_products'] = [str(i.pk) for i in self.copy_from.cross_selling_match_products.all()]
         else:
             kwargs['instance'] = ItemCategory(event=self.request.event)
         return kwargs
@@ -661,6 +663,10 @@ class QuestionView(EventPermissionRequiredMixin, QuestionMixin, ChartContainingV
             question=self.object, orderposition__isnull=False,
             orderposition__order__event=self.request.event
         )
+
+        if self.request.GET.get("subevent", "") != "":
+            qs = qs.filter(orderposition__subevent=self.request.GET["subevent"])
+
         s = self.request.GET.get("status", "np")
         if s != "":
             if s == 'o':
@@ -914,16 +920,19 @@ class QuotaCreate(EventPermissionRequiredMixin, CreateView):
     def get_form_kwargs(self):
         kwargs = super().get_form_kwargs()
 
+        kwargs.setdefault('initial', {})
         if self.copy_from:
             i = modelcopy(self.copy_from)
             i.pk = None
             kwargs['instance'] = i
-            kwargs.setdefault('initial', {})
             kwargs['initial']['itemvars'] = [str(i.pk) for i in self.copy_from.items.all()] + [
                 '{}-{}'.format(v.item_id, v.pk) for v in self.copy_from.variations.all()
             ]
         else:
             kwargs['instance'] = Quota(event=self.request.event)
+            if 'product' in self.request.GET:
+                kwargs['initial']['itemvars'] = self.request.GET.getlist('product')
+
         return kwargs
 
     def form_invalid(self, form):
@@ -1323,6 +1332,8 @@ class ItemUpdateGeneral(ItemDetailMixin, EventPermissionRequiredMixin, MetaDataE
     def plugin_forms(self):
         forms = []
         for rec, resp in item_forms.send(sender=self.request.event, item=self.item, request=self.request):
+            if not resp:
+                continue
             if isinstance(resp, (list, tuple)):
                 forms.extend(resp)
             else:
@@ -1483,6 +1494,12 @@ class ItemUpdateGeneral(ItemDetailMixin, EventPermissionRequiredMixin, MetaDataE
         messages.error(self.request, _('We could not save your changes. See below for details.'))
         return super().form_invalid(form)
 
+    def get_object(self, queryset=None) -> Item:
+        o = super().get_object(queryset)
+        if o.hide_without_voucher:
+            o.require_voucher = True
+        return o
+
     def get_context_data(self, **kwargs):
         ctx = super().get_context_data()
         ctx['plugin_forms'] = self.plugin_forms
@@ -1494,7 +1511,7 @@ class ItemUpdateGeneral(ItemDetailMixin, EventPermissionRequiredMixin, MetaDataE
                                           "Your participants won't be able to buy the bundle unless you remove this "
                                           "item from it."))
 
-        ctx['sales_channels'] = get_all_sales_channels()
+        ctx['sales_channels'] = self.request.organizer.sales_channels.all()
         return ctx
 
     @cached_property
@@ -1506,7 +1523,9 @@ class ItemUpdateGeneral(ItemDetailMixin, EventPermissionRequiredMixin, MetaDataE
                 can_order=True, can_delete=True, extra=0
             )(
                 self.request.POST if self.request.method == "POST" else None,
-                queryset=ItemVariation.objects.filter(item=self.get_object()).prefetch_related('meta_values', 'require_membership_types'),
+                queryset=ItemVariation.objects.filter(item=self.get_object()).prefetch_related(
+                    'meta_values', 'limit_sales_channels', 'require_membership_types'
+                ),
                 event=self.request.event, prefix="variations"
             )),
             ('addons', inlineformset_factory(

@@ -62,6 +62,7 @@ INSTALLED_APPS = [
     'pretix.plugins.badges',
     'pretix.plugins.manualpayment',
     'pretix.plugins.returnurl',
+    'pretix.plugins.autocheckin',
     'pretix.plugins.webcheckin',
     'django_countries',
     'oauth2_provider',
@@ -74,11 +75,21 @@ FORMAT_MODULE_PATH = [
     'pretix.helpers.formats',
 ]
 
+CORE_MODULES = {
+    "pretix.base",
+    "pretix.presale",
+    "pretix.control",
+    "pretix.plugins.checkinlists",
+    "pretix.plugins.reports",
+}
+
 ALL_LANGUAGES = [
     ('en', _('English')),
     ('de', _('German')),
     ('de-informal', _('German (informal)')),
     ('ar', _('Arabic')),
+    ('eu', _('Basque')),
+    ('ca', _('Catalan')),
     ('zh-hans', _('Chinese (simplified)')),
     ('zh-hant', _('Chinese (traditional)')),
     ('cs', _('Czech')),
@@ -91,6 +102,7 @@ ALL_LANGUAGES = [
     ('el', _('Greek')),
     ('id', _('Indonesian')),
     ('it', _('Italian')),
+    ('ja', _('Japanese')),
     ('lv', _('Latvian')),
     ('nb-no', _('Norwegian Bokmål')),
     ('pl', _('Polish')),
@@ -98,6 +110,8 @@ ALL_LANGUAGES = [
     ('pt-br', _('Portuguese (Brazil)')),
     ('ro', _('Romanian')),
     ('ru', _('Russian')),
+    ('sk', _('Slovak')),
+    ('sv', _('Swedish')),
     ('es', _('Spanish')),
     ('tr', _('Turkish')),
     ('uk', _('Ukrainian')),
@@ -111,6 +125,7 @@ LANGUAGES_RTL = {
 LANGUAGES_INCUBATING = {
     'fi', 'pt-br', 'gl',
 }
+LANGUAGES = ALL_LANGUAGES
 LOCALE_PATHS = [
     os.path.join(os.path.dirname(__file__), 'locale'),
 ]
@@ -147,6 +162,12 @@ EXTRA_LANG_INFO = {
         'code': 'pt-pt',
         'name': 'Portuguese',
         'name_local': 'Português',
+    },
+    'nb-no': {
+        'bidi': False,
+        'code': 'nb-no',
+        'name': 'Norwegian Bokmal',
+        'name_local': 'norsk (bokmål)',
     },
 }
 
@@ -234,7 +255,12 @@ COMPRESS_FILTERS = {
     )
 }
 
-CURRENCIES = list(currencies)
+CURRENCIES = [
+    c for c in currencies
+    if c.alpha_3 not in {
+        'XAG', 'XAU', 'XBA', 'XBB', 'XBC', 'XBD', 'XDR', 'XPD', 'XPT', 'XSU', 'XTS', 'XUA',
+    }
+]
 CURRENCY_PLACES = {
     # default is 2
     'BIF': 0,
@@ -276,7 +302,7 @@ PILLOW_FORMATS_QUESTIONS_IMAGE = ('PNG', 'GIF', 'JPEG', 'BMP', 'TIFF')
 FILE_UPLOAD_EXTENSIONS_EMAIL_ATTACHMENT = (
     ".png", ".jpg", ".gif", ".jpeg", ".pdf", ".txt", ".docx", ".gif", ".svg",
     ".pptx", ".ppt", ".doc", ".xlsx", ".xls", ".jfif", ".heic", ".heif", ".pages",
-    ".bmp", ".tif", ".tiff"
+    ".bmp", ".tif", ".tiff", ".ics",
 )
 FILE_UPLOAD_EXTENSIONS_OTHER = FILE_UPLOAD_EXTENSIONS_EMAIL_ATTACHMENT
 

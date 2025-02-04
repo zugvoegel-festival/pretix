@@ -31,7 +31,6 @@
 # Unless required by applicable law or agreed to in writing, software distributed under the Apache License 2.0 is
 # distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 # License for the specific language governing permissions and limitations under the License.
-import hashlib
 import json
 import logging
 from decimal import Decimal
@@ -81,15 +80,11 @@ logger = logging.getLogger('pretix.plugins.paypal2')
 class PaypalOrderView:
     def dispatch(self, request, *args, **kwargs):
         try:
-            self.order = request.event.orders.get(code=kwargs['order'])
-            if hashlib.sha1(self.order.secret.lower().encode()).hexdigest() != kwargs['hash'].lower():
-                raise Http404('Unknown order')
+            self.order = request.event.orders.get_with_secret_check(
+                code=kwargs['order'], received_secret=kwargs['hash'].lower(), tag='plugins:paypal2:pay'
+            )
         except Order.DoesNotExist:
-            # Do a hash comparison as well to harden timing attacks
-            if 'abcdefghijklmnopq'.lower() == hashlib.sha1('abcdefghijklmnopq'.encode()).hexdigest():
-                raise Http404('Unknown order')
-            else:
-                raise Http404('Unknown order')
+            raise Http404('Unknown order')
         return super().dispatch(request, *args, **kwargs)
 
     @cached_property
@@ -190,6 +185,10 @@ class XHRView(View):
 class PayView(PaypalOrderView, TemplateView):
     template_name = ''
 
+    def dispatch(self, request, *args, **kwargs):
+        self.request.pci_dss_payment_page = True
+        return super().dispatch(request, *args, **kwargs)
+
     def get(self, request, *args, **kwargs):
         if self.payment.state != OrderPayment.PAYMENT_STATE_CREATED:
             return self._redirect_to_order()
@@ -265,7 +264,7 @@ def isu_return(request, *args, **kwargs):
             elif request.GET.get("isEmailConfirmed") == "false":  # Yes - literal!
                 messages.error(
                     request,
-                    _('The e-mail address on your PayPal account has not yet been confirmed. You will need to do '
+                    _('The email address on your PayPal account has not yet been confirmed. You will need to do '
                       'this before you can start accepting payments.')
                 )
             else:
@@ -482,29 +481,41 @@ def webhook(request, *args, **kwargs):
                     amount=payment.amount - known_sum
                 )
     elif payment.state in (OrderPayment.PAYMENT_STATE_PENDING, OrderPayment.PAYMENT_STATE_CREATED,
-                           OrderPayment.PAYMENT_STATE_CANCELED, OrderPayment.PAYMENT_STATE_FAILED) \
-            and sale['status'] == 'COMPLETED':
-        any_captures = False
-        all_captures_completed = True
-        for purchaseunit in sale['purchase_units']:
-            for capture in purchaseunit['payments']['captures']:
-                try:
-                    ReferencedPayPalObject.objects.get_or_create(order=payment.order, payment=payment,
-                                                                 reference=capture['id'])
-                except ReferencedPayPalObject.MultipleObjectsReturned:
-                    pass
+                           OrderPayment.PAYMENT_STATE_CANCELED, OrderPayment.PAYMENT_STATE_FAILED):
+        if sale['status'] == 'COMPLETED':
+            any_captures = False
+            all_captures_completed = True
+            for purchaseunit in sale['purchase_units']:
+                for capture in purchaseunit['payments']['captures']:
+                    try:
+                        ReferencedPayPalObject.objects.get_or_create(order=payment.order, payment=payment,
+                                                                     reference=capture['id'])
+                    except ReferencedPayPalObject.MultipleObjectsReturned:
+                        pass
 
-                if capture['status'] not in ('COMPLETED', 'REFUNDED', 'PARTIALLY_REFUNDED'):
-                    all_captures_completed = False
-                else:
-                    any_captures = True
-        if any_captures and all_captures_completed:
+                    if capture['status'] not in ('COMPLETED', 'REFUNDED', 'PARTIALLY_REFUNDED'):
+                        all_captures_completed = False
+                    else:
+                        any_captures = True
+            if any_captures and all_captures_completed:
+                try:
+                    payment.info = json.dumps(sale.dict())
+                    payment.save(update_fields=['info'])
+                    payment.confirm()
+                except Quota.QuotaExceededException:
+                    pass
+        elif sale['status'] == 'APPROVED':
             try:
-                payment.info = json.dumps(sale.dict())
-                payment.save(update_fields=['info'])
-                payment.confirm()
-            except Quota.QuotaExceededException:
-                pass
+                request.session['payment_paypal_oid'] = payment.info_data['id']
+                payment.payment_provider.execute_payment(request, payment)
+            except KeyError:
+                # We might receive the CHECKOUT.ORDER.APPROVED webhook early if the user approves the payment but
+                # the order has not been created yet. In these cases, we will skip the immediate capture until
+                # the Order and OrderPayment has been created, and we can capture the payment in the regular
+                # execute_payment run.
+                logger.info('PayPal2 - Did not capture/execute_payment from Webhook: payment was not yet populated.')
+            except PaymentException as e:
+                logger.exception('PayPal2 - Could not capture/execute_payment from Webhook: {}'.format(str(e)))
 
     return HttpResponse(status=200)
 

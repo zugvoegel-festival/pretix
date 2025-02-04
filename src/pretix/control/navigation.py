@@ -78,7 +78,7 @@ def get_event_navigation(request: HttpRequest):
                 'active': url.url_name == 'event.settings.tickets',
             },
             {
-                'label': _('E-mail'),
+                'label': _('Email'),
                 'url': reverse('control:event.settings.mail', kwargs={
                     'event': request.event.slug,
                     'organizer': request.event.organizer.slug,
@@ -132,16 +132,6 @@ def get_event_navigation(request: HttpRequest):
             'icon': 'wrench',
             'children': event_settings
         })
-        if request.event.has_subevents:
-            nav.append({
-                'label': pgettext_lazy('subevent', 'Dates'),
-                'url': reverse('control:event.subevents', kwargs={
-                    'event': request.event.slug,
-                    'organizer': request.event.organizer.slug,
-                }),
-                'active': ('event.subevent' in url.url_name),
-                'icon': 'calendar',
-            })
 
     if 'can_change_items' in request.eventpermset:
         nav.append({
@@ -196,6 +186,18 @@ def get_event_navigation(request: HttpRequest):
                 },
             ]
         })
+
+    if 'can_change_event_settings' in request.eventpermset:
+        if request.event.has_subevents:
+            nav.append({
+                'label': pgettext_lazy('subevent', 'Dates'),
+                'url': reverse('control:event.subevents', kwargs={
+                    'event': request.event.slug,
+                    'organizer': request.event.organizer.slug,
+                }),
+                'active': ('event.subevent' in url.url_name),
+                'icon': 'calendar',
+            })
 
     if 'can_view_orders' in request.eventpermset:
         children = [
@@ -444,6 +446,11 @@ def get_global_navigation(request):
                     'url': reverse('control:global.license'),
                     'active': (url.url_name == 'global.license'),
                 },
+                {
+                    'label': _('System report'),
+                    'url': reverse('control:global.sysreport'),
+                    'active': (url.url_name == 'global.sysreport'),
+                },
             ]
         })
 
@@ -491,11 +498,18 @@ def get_organizer_navigation(request):
                     'active': url.url_name.startswith('organizer.propert'),
                 },
                 {
-                    'label': _('E-mail'),
+                    'label': _('Email'),
                     'url': reverse('control:organizer.settings.mail', kwargs={
                         'organizer': request.organizer.slug,
                     }),
                     'active': url.url_name == 'organizer.settings.mail',
+                },
+                {
+                    'label': _('Sales channels'),
+                    'url': reverse('control:organizer.channels', kwargs={
+                        'organizer': request.organizer.slug
+                    }),
+                    'active': url.url_name.startswith('organizer.channel'),
                 },
                 {
                     'label': _('Webhooks'),

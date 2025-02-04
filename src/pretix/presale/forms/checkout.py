@@ -54,7 +54,7 @@ from pretix.presale.signals import contact_form_fields
 
 class ContactForm(forms.Form):
     required_css_class = 'required'
-    email = forms.EmailField(label=_('E-mail'),
+    email = forms.EmailField(label=_('Email'),
                              validators=[EmailBanlistValidator()],
                              widget=forms.EmailInput(attrs={'autocomplete': 'section-contact email'})
                              )
@@ -67,7 +67,7 @@ class ContactForm(forms.Form):
 
         if self.event.settings.order_email_asked_twice:
             self.fields['email_repeat'] = forms.EmailField(
-                label=_('E-mail address (repeated)'),
+                label=_('Email address (repeated)'),
                 help_text=_('Please enter the same email address again to make sure you typed it correctly.'),
             )
 
@@ -133,6 +133,7 @@ class InvoiceAddressForm(BaseInvoiceAddressForm):
 
 
 class InvoiceNameForm(InvoiceAddressForm):
+    address_validation = False
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -225,7 +226,9 @@ class MembershipForm(forms.Form):
 
         memberships = [
             m for m in self.memberships
-            if m.is_valid(ev) and m.membership_type in types
+            if m.membership_type in types and (
+                m.is_valid(ev, self.position.valid_from, valid_from_not_chosen=self.position.item.validity_dynamic_start_choice)
+            )
         ]
 
         if len(memberships) == 1:

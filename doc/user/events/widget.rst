@@ -17,8 +17,8 @@ and then click "Generate widget code".
 You will obtain two code snippets that look *roughly* like the following. The first should be embedded into the
 ``<head>`` part of your website, if possible. If this inconvenient, you can put it in the ``<body>`` part as well::
 
-    <link rel="stylesheet" type="text/css" href="https://pretix.eu/demo/democon/widget/v1.css">
-    <script type="text/javascript" src="https://pretix.eu/widget/v1.en.js" async></script>
+    <link rel="stylesheet" type="text/css" href="https://pretix.eu/demo/democon/widget/v1.css" crossorigin>
+    <script type="text/javascript" src="https://pretix.eu/widget/v1.en.js" async crossorigin></script>
 
 The second snippet should be embedded at the position where the widget should show up::
 
@@ -94,6 +94,18 @@ If you want the checkout process to always open a new tab regardless of screen s
 attribute::
 
    <pretix-widget event="https://pretix.eu/demo/democon/" disable-iframe></pretix-widget>
+
+
+Always show event’s info
+------------------------
+
+If you want the widget to show the event’s info such as title, location and frontpage text, you can pass the optional 
+``display-event-info`` attribute with either a value of ``"false"``, ``"true"`` or ``"auto"`` – the latter being the 
+default if the attribute is not present at all.
+
+Note that any other value than ``"false"`` or ``"auto"`` means ``"true"``::
+
+   <pretix-widget event="https://pretix.eu/demo/democon/" display-event-info></pretix-widget>
 
 
 Pre-selecting a voucher
@@ -339,9 +351,9 @@ Currently, the following attributes are understood by pretix itself:
   ``data-attendee-name``, which will pre-fill the last part of the name, whatever that is.
 
 * ``data-invoice-address-FIELD`` will  pre-fill the corresponding field of the invoice address. Possible values for
-  ``FIELD`` are ``company``, ``street``, ``zipcode``, ``city`` and ``country``, as well as fields specified by the
-  naming scheme such as ``name-title`` or ``name-given-name`` (see above). ``country`` expects a two-character
-  country code.
+  ``FIELD`` are ``company``, ``street``, ``zipcode``, ``city``, ``country``, ``internal-reference``, ``vat-id``, and
+  ``custom-field``, as well as fields specified by the naming scheme such as ``name-title`` or ``name-given-name``
+  (see above). ``country`` expects a two-character country code.
 
 * If ``data-fix="true"`` is given, the user will not be able to change the other given values later. This currently
   only works for the order email address as well as the invoice address. Attendee-level fields and questions can
@@ -429,4 +441,57 @@ Hosted or pretix Enterprise are active, you can pass the following fields:
             });
         </script>  
 
+
+Offering wallet payments (Apple Pay, Google Pay) within the widget
+------------------------------------------------------------------
+
+Some payment providers (such as Stripe) also offer Apple or Google Pay. But in order to use them, the domain of the
+payment needs to be approved first. As of right now, pretix will take care of the domain verification process for you
+automatically, when using Stripe. However, pretix can only validate the domain that is being used for your default,
+"stand-alone" shop (such as https://pretix.eu/demo/democon/ ).
+
+When embedding the widget on your website, the domain of the embedding page will also need to be validated in order to
+be able to use it for wallet payments.
+
+The details might vary from payment provider to payment provider, but generally speaking, it will either involve just
+telling your payment provider the domain name and (for Apple Pay) placing an
+``apple-developer-merchantid-domain-association``-file into the ``.well-known``-directory of your domain.
+
+Further reading:
+
+* `Stripe Payment Method Domain registration`_
+
+
+Content Security Policy
+-----------------------
+
+When using a Content Security Policy (CSP) on your website, you may need to make some adjustments. If your pretix
+shop is running under a custom domain, you need to add the following rules:
+
+* ``script-src``: ``'unsafe-eval' https://pretix.eu`` (adjust to your domain for self-hosted pretix)
+* ``style-src``: ``https://pretix.eu`` (adjust to your domain for self-hosted pretix **and** for custom domain on pretix Hosted)
+* ``connect-src``: ``https://pretix.eu`` (adjust to your domain for self-hosted pretix **and** for custom domain on pretix Hosted)
+* ``frame-src``: ``https://pretix.eu`` (adjust to your domain for self-hosted pretix **and** for custom domain on pretix Hosted)
+* ``img-src``: ``https://pretix.eu`` (adjust to your domain for self-hosted pretix **and** for custom domain on pretix Hosted) and for pretix Hosted additionally add ``https://cdn.pretix.space``
+
+
+External payment providers and Cross-Origin-Opener-Policy
+---------------------------------------------------------
+
+If you use a payment provider that opens a new window during checkout (such as PayPal), be aware that setting
+``Cross-Origin-Opener-Policy: same-origin`` results in an empty popup-window being opened in the foreground. This is
+due to JavaScript not having access to the opened window. To mitigate this, you either need to always open the widget’s
+checkout in a new tab (see :ref:`Always open a new tab`) or set ``Cross-Origin-Opener-Policy: same-origin-allow-popups``
+
+
+Working with Cross-Origin-Embedder-Policy
+-----------------------------------------
+
+The pretix widget is unfortunately not compatible with ``Cross-Origin-Embedder-Policy: require-corp``. If you include
+the ``crossorigin`` attributes on the ``<script>`` and ``<link>`` tag as shown above, the widget can show a calendar
+or product list, but will not be able to open the checkout process in an iframe. If you also set
+``Cross-Origin-Opener-Policy: same-origin``, the widget can auto-detect that it is running in an isolated enviroment
+and will instead open the checkout process in a new tab.
+
 .. _Let's Encrypt: https://letsencrypt.org/
+.. _Stripe Payment Method Domain registration: https://stripe.com/docs/payments/payment-methods/pmd-registration

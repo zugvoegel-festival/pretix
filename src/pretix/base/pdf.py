@@ -49,7 +49,7 @@ from io import BytesIO
 
 import jsonschema
 import reportlab.rl_config
-from bidi.algorithm import get_display
+from bidi import get_display
 from django.conf import settings
 from django.contrib.staticfiles import finders
 from django.core.exceptions import ValidationError
@@ -62,8 +62,7 @@ from django.utils.html import conditional_escape
 from django.utils.timezone import now
 from django.utils.translation import gettext_lazy as _, pgettext
 from i18nfield.strings import LazyI18nString
-from pypdf import PdfReader, PdfWriter, Transformation
-from pypdf.generic import RectangleObject
+from pypdf import PdfReader, PdfWriter
 from reportlab.graphics import renderPDF
 from reportlab.graphics.barcode.qr import QrCodeWidget
 from reportlab.graphics.shapes import Drawing
@@ -78,7 +77,7 @@ from reportlab.pdfgen.canvas import Canvas
 from reportlab.platypus import Paragraph
 
 from pretix.base.i18n import language
-from pretix.base.models import Order, OrderPosition, Question
+from pretix.base.models import Event, Order, OrderPosition, Question
 from pretix.base.settings import PERSON_NAME_SCHEMES
 from pretix.base.signals import layout_image_variables, layout_text_variables
 from pretix.base.templatetags.money import money_filter
@@ -405,6 +404,30 @@ DEFAULT_VARIABLES = OrderedDict((
         "editor_sample": _("19:00"),
         "evaluate": lambda op, order, ev: date_format(
             now().astimezone(ev.timezone),
+            "TIME_FORMAT"
+        )
+    }),
+    ("purchase_date", {
+        "label": _("Purchase date"),
+        "editor_sample": _("2017-05-31"),
+        "evaluate": lambda op, order, ev: date_format(
+            order.datetime.astimezone(ev.timezone),
+            "SHORT_DATE_FORMAT"
+        )
+    }),
+    ("purchase_datetime", {
+        "label": _("Purchase date and time"),
+        "editor_sample": _("2017-05-31 19:00"),
+        "evaluate": lambda op, order, ev: date_format(
+            order.datetime.astimezone(ev.timezone),
+            "SHORT_DATETIME_FORMAT"
+        )
+    }),
+    ("purchase_time", {
+        "label": _("Purchase time"),
+        "editor_sample": _("19:00"),
+        "evaluate": lambda op, order, ev: date_format(
+            order.datetime.astimezone(ev.timezone),
             "TIME_FORMAT"
         )
     }),
@@ -738,9 +761,10 @@ class Renderer:
         else:
             self.bg_bytes = None
             self.bg_pdf = None
+        self.event_fonts = list(get_fonts(event, pdf_support_required=True).keys()) + ['Open Sans']
 
     @classmethod
-    def _register_fonts(cls):
+    def _register_fonts(cls, event: Event = None):
         if hasattr(cls, '_fonts_registered'):
             return
         pdfmetrics.registerFont(TTFont('Open Sans', finders.find('fonts/OpenSans-Regular.ttf')))
@@ -748,7 +772,7 @@ class Renderer:
         pdfmetrics.registerFont(TTFont('Open Sans B', finders.find('fonts/OpenSans-Bold.ttf')))
         pdfmetrics.registerFont(TTFont('Open Sans B I', finders.find('fonts/OpenSans-BoldItalic.ttf')))
 
-        for family, styles in get_fonts().items():
+        for family, styles in get_fonts(event, pdf_support_required=True).items():
             pdfmetrics.registerFont(TTFont(family, finders.find(styles['regular']['truetype'])))
             if 'italic' in styles:
                 pdfmetrics.registerFont(TTFont(family + ' I', finders.find(styles['italic']['truetype'])))
@@ -932,19 +956,27 @@ class Renderer:
             )
             canvas.restoreState()
 
-    def _draw_textarea(self, canvas: Canvas, op: OrderPosition, order: Order, o: dict):
+    def _text_paragraph(self, op: OrderPosition, order: Order, o: dict, legacy_lineheight=False, override_fontsize=None):
         font = o['fontfamily']
+
+        # Since pdfmetrics.registerFont is global, we want to make sure that no one tries to sneak in a font, they
+        # should not have access to.
+        if font not in self.event_fonts:
+            logger.warning(f'Unauthorized use of font "{font}"')
+            font = 'Open Sans'
+
         if o['bold']:
             font += ' B'
         if o['italic']:
             font += ' I'
 
+        fontsize = override_fontsize if override_fontsize is not None else float(o['fontsize'])
         try:
-            ad = getAscentDescent(font, float(o['fontsize']))
+            ad = getAscentDescent(font, fontsize)
         except KeyError:  # font not known, fall back
             logger.warning(f'Use of unknown font "{font}"')
             font = 'Open Sans'
-            ad = getAscentDescent(font, float(o['fontsize']))
+            ad = getAscentDescent(font, fontsize)
 
         align_map = {
             'left': TA_LEFT,
@@ -954,16 +986,17 @@ class Renderer:
         # lineheight display differs from browser canvas. This calc is just empirical values to get
         # reportlab render similarly to browser canvas.
         # for backwards compatability use „uncorrected“ lineheight of 1.0 instead of 1.15
-        lineheight = float(o['lineheight']) * 1.15 if 'lineheight' in o else 1.0
+        lineheight = float(o['lineheight']) * 1.15 if not legacy_lineheight or 'lineheight' in o else 1.0
         style = ParagraphStyle(
             name=uuid.uuid4().hex,
             fontName=font,
-            fontSize=float(o['fontsize']),
-            leading=lineheight * float(o['fontsize']),
+            fontSize=fontsize,
+            leading=lineheight * fontsize,
             # for backwards compatability use autoLeading if no lineheight is given
-            autoLeading='off' if 'lineheight' in o else 'max',
+            autoLeading='off' if not legacy_lineheight or 'lineheight' in o else 'max',
             textColor=Color(o['color'][0] / 255, o['color'][1] / 255, o['color'][2] / 255),
-            alignment=align_map[o['align']]
+            alignment=align_map[o['align']],
+            splitLongWords=o.get('splitlongwords', True),
         )
         # add an almost-invisible space &hairsp; after hyphens as word-wrap in ReportLab only works on space chars
         text = conditional_escape(
@@ -982,6 +1015,41 @@ class Renderer:
             logger.exception('Reshaping/Bidi fixes failed on string {}'.format(repr(text)))
 
         p = Paragraph(text, style=style)
+        return p, ad, lineheight
+
+    def _draw_textcontainer(self, canvas: Canvas, op: OrderPosition, order: Order, o: dict):
+        fontsize = float(o['fontsize'])
+        height = float(o['height']) * mm
+        width = float(o['width']) * mm
+        while True:
+            p, ad, lineheight = self._text_paragraph(op, order, o, override_fontsize=fontsize)
+            w, h = p.wrapOn(canvas, width, 1000 * mm)
+            widths = p.getActualLineWidths0()
+            if not widths:
+                break
+            actual_w = max(widths)
+            if not o.get('autoresize', False) or (h <= height and actual_w <= width) or fontsize <= 1.0:
+                break
+            if h > height:  # we can do larger steps for height
+                fontsize -= max(1.0, fontsize * .1)
+            else:
+                fontsize -= max(.25, fontsize * .025)
+
+        canvas.saveState()
+        # The ascent/descent offsets here are not really proven to be correct, they're just empirical values to get
+        # reportlab render similarly to browser canvas.
+        canvas.translate(float(o['left']) * mm, float(o['bottom']) * mm + height)
+        canvas.rotate(o.get('rotation', 0) * -1)
+        if o.get('verticalalign', 'top') == 'top':
+            p.drawOn(canvas, 0, - h)
+        elif o.get('verticalalign', 'top') == 'middle':
+            p.drawOn(canvas, 0, (-height - h) / 2)
+        elif o.get('verticalalign', 'top') == 'bottom':
+            p.drawOn(canvas, 0, -height)
+        canvas.restoreState()
+
+    def _draw_textarea(self, canvas: Canvas, op: OrderPosition, order: Order, o: dict):
+        p, ad, lineheight = self._text_paragraph(op, order, o, legacy_lineheight=True)
         w, h = p.wrapOn(canvas, float(o['width']) * mm, 1000 * mm)
         # p_size = p.wrap(float(o['width']) * mm, 1000 * mm)
         canvas.saveState()
@@ -1020,6 +1088,8 @@ class Renderer:
                     self._draw_barcodearea(canvas, op, order, o)
                 elif o['type'] == "imagearea":
                     self._draw_imagearea(canvas, op, order, o)
+                elif o['type'] == "textcontainer":
+                    self._draw_textcontainer(canvas, op, order, o)
                 elif o['type'] == "textarea":
                     self._draw_textarea(canvas, op, order, o)
                 elif o['type'] == "poweredby":
@@ -1037,56 +1107,81 @@ class Renderer:
                 canvas.showPage()
 
     def render_background(self, buffer, title=_('Ticket')):
+        buffer.seek(0)
+        fg_pdf = PdfReader(buffer)
+
         if settings.PDFTK:
-            buffer.seek(0)
             with tempfile.TemporaryDirectory() as d:
-                with open(os.path.join(d, 'back.pdf'), 'wb') as f:
-                    f.write(self.bg_bytes)
-                with open(os.path.join(d, 'front.pdf'), 'wb') as f:
+                fg_filename = os.path.join(d, 'fg.pdf')
+                bg_filename = os.path.join(d, 'bg.pdf')
+                out_filename = os.path.join(d, 'out.pdf')
+
+                buffer.seek(0)
+                with open(fg_filename, 'wb') as f:
                     f.write(buffer.read())
-                subprocess.run([
-                    settings.PDFTK,
-                    os.path.join(d, 'front.pdf'),
-                    'multibackground',
-                    os.path.join(d, 'back.pdf'),
-                    'output',
-                    os.path.join(d, 'out.pdf'),
-                    'compress'
-                ], check=True)
-                with open(os.path.join(d, 'out.pdf'), 'rb') as f:
+                # pdf_header is a string like "%pdf-X.X"
+                if float(self.bg_pdf.pdf_header[5:]) > float(fg_pdf.pdf_header[5:]):
+                    # To fix issues with pdftk and background-PDF using pdf-version greater
+                    # than foreground-PDF, we stamp front onto back instead.
+                    # Just changing PDF-version in fg.pdf to match the version of
+                    # bg.pdf as we do with pypdf, does not work with pdftk.
+                    #
+                    # Make sure that bg.pdf matches the number of pages of fg.pdf
+                    # note: self.bg_pdf is a PdfReader(), not a PdfWriter()
+                    fg_num_pages = fg_pdf.get_num_pages()
+                    bg_num_pages = self.bg_pdf.get_num_pages()
+                    bg_pdf_to_merge = PdfWriter()
+                    bg_pdf_to_merge.append(
+                        self.bg_pdf,
+                        pages=(0, min(bg_num_pages, fg_num_pages)),
+                        import_outline=False,
+                        excluded_fields=("/Annots", "/B")
+                    )
+                    if fg_num_pages > bg_num_pages:
+                        # repeat last page in bg_pdf to match fg_pdf
+                        bg_pdf_to_merge.append(
+                            bg_pdf_to_merge,
+                            pages=[bg_num_pages - 1] * (fg_num_pages - bg_num_pages),
+                            import_outline=False,
+                            excluded_fields=("/Annots", "/B")
+                        )
+
+                    bg_pdf_to_merge.write(bg_filename)
+
+                    pdftk_cmd = [
+                        settings.PDFTK,
+                        bg_filename,
+                        'multistamp',
+                        fg_filename
+                    ]
+
+                else:
+                    with open(bg_filename, 'wb') as f:
+                        f.write(self.bg_bytes)
+                    pdftk_cmd = [
+                        settings.PDFTK,
+                        fg_filename,
+                        'multibackground',
+                        bg_filename
+                    ]
+
+                pdftk_cmd.extend(('output', out_filename, 'compress'))
+                subprocess.run(pdftk_cmd, check=True)
+                with open(out_filename, 'rb') as f:
                     return BytesIO(f.read())
         else:
-            buffer.seek(0)
-            new_pdf = PdfReader(buffer)
             output = PdfWriter()
 
-            for i, page in enumerate(new_pdf.pages):
-                bg_page = copy.deepcopy(self.bg_pdf.pages[i])
-                bg_rotation = bg_page.get('/Rotate')
-                if bg_rotation:
-                    # /Rotate is clockwise, transformation.rotate is counter-clockwise
-                    t = Transformation().rotate(bg_rotation)
-                    w = float(page.mediabox.getWidth())
-                    h = float(page.mediabox.getHeight())
-                    if bg_rotation in (90, 270):
-                        # offset due to rotation base
-                        if bg_rotation == 90:
-                            t = t.translate(h, 0)
-                        else:
-                            t = t.translate(0, w)
-                        # rotate mediabox as well
-                        page.mediabox = RectangleObject((
-                            page.mediabox.left.as_numeric(),
-                            page.mediabox.bottom.as_numeric(),
-                            page.mediabox.top.as_numeric(),
-                            page.mediabox.right.as_numeric(),
-                        ))
-                        page.trimbox = page.mediabox
-                    elif bg_rotation == 180:
-                        t = t.translate(w, h)
-                    page.add_transformation(t)
-                bg_page.merge_page(page)
-                output.add_page(bg_page)
+            for i, page in enumerate(fg_pdf.pages):
+                bg_page = self.bg_pdf.pages[i]
+                if bg_page.rotation != 0:
+                    bg_page.transfer_rotation_to_content()
+                page.merge_page(bg_page, over=False)
+                output.add_page(page)
+
+            # pdf_header is a string like "%pdf-X.X"
+            if float(self.bg_pdf.pdf_header[5:]) > float(fg_pdf.pdf_header[5:]):
+                output.pdf_header = self.bg_pdf.pdf_header
 
             output.add_metadata({
                 '/Title': str(title),
@@ -1098,54 +1193,66 @@ class Renderer:
             return outbuffer
 
 
-def merge_background(fg_pdf, bg_pdf, out_file, compress):
+def merge_background(fg_pdf: PdfWriter, bg_pdf: PdfWriter, out_file, compress):
     if settings.PDFTK:
         with tempfile.TemporaryDirectory() as d:
             fg_filename = os.path.join(d, 'fg.pdf')
             bg_filename = os.path.join(d, 'bg.pdf')
-            fg_pdf.write(fg_filename)
-            bg_pdf.write(bg_filename)
-            pdftk_cmd = [
-                settings.PDFTK,
-                fg_filename,
-                'multibackground',
-                bg_filename,
-                'output',
-                '-',
-            ]
+
+            # pdf_header is a string like "%pdf-X.X"
+            if float(bg_pdf.pdf_header[5:]) > float(fg_pdf.pdf_header[5:]):
+                # To fix issues with pdftk and background-PDF using pdf-version greater
+                # than foreground-PDF, we stamp front onto back instead.
+                # Just changing PDF-version in fg.pdf to match the version of
+                # bg.pdf as we do with pypdf, does not work with pdftk.
+
+                # Make sure that bg.pdf matches the number of pages of fg.pdf
+                fg_num_pages = fg_pdf.get_num_pages()
+                bg_num_pages = bg_pdf.get_num_pages()
+                if fg_num_pages > bg_num_pages:
+                    # repeat last page in bg_pdf to match fg_pdf
+                    bg_pdf.append(
+                        bg_pdf,
+                        pages=[bg_num_pages - 1] * (fg_num_pages - bg_num_pages),
+                        import_outline=False,
+                        excluded_fields=("/Annots", "/B")
+                    )
+
+                bg_pdf.write(bg_filename)
+
+                pdftk_cmd = [
+                    settings.PDFTK,
+                    bg_filename,
+                    'multistamp',
+                    fg_filename,
+                ]
+            else:
+                pdftk_cmd = [
+                    settings.PDFTK,
+                    fg_filename,
+                    'multibackground',
+                    bg_filename
+                ]
+
+            pdftk_cmd.extend(('output', '-'))
             if compress:
                 pdftk_cmd.append('compress')
+
+            fg_pdf.write(fg_filename)
+            bg_pdf.write(bg_filename)
             subprocess.run(pdftk_cmd, check=True, stdout=out_file)
     else:
-        output = PdfWriter()
         for i, page in enumerate(fg_pdf.pages):
-            bg_page = copy.deepcopy(bg_pdf.pages[i])
-            bg_rotation = bg_page.get('/Rotate')
-            if bg_rotation:
-                # /Rotate is clockwise, transformation.rotate is counter-clockwise
-                t = Transformation().rotate(bg_rotation)
-                w = float(page.mediabox.getWidth())
-                h = float(page.mediabox.getHeight())
-                if bg_rotation in (90, 270):
-                    # offset due to rotation base
-                    if bg_rotation == 90:
-                        t = t.translate(h, 0)
-                    else:
-                        t = t.translate(0, w)
-                    # rotate mediabox as well
-                    page.mediabox = RectangleObject((
-                        page.mediabox.left.as_numeric(),
-                        page.mediabox.bottom.as_numeric(),
-                        page.mediabox.top.as_numeric(),
-                        page.mediabox.right.as_numeric(),
-                    ))
-                    page.trimbox = page.mediabox
-                elif bg_rotation == 180:
-                    t = t.translate(w, h)
-                page.add_transformation(t)
-            bg_page.merge_page(page)
-            output.add_page(bg_page)
-        output.write(out_file)
+            bg_page = bg_pdf.pages[i]
+            if bg_page.rotation != 0:
+                bg_page.transfer_rotation_to_content()
+            page.merge_page(bg_page, over=False)
+
+        # pdf_header is a string like "%pdf-X.X"
+        if float(bg_pdf.pdf_header[5:]) > float(fg_pdf.pdf_header[5:]):
+            fg_pdf.pdf_header = bg_pdf.pdf_header
+
+        fg_pdf.write(out_file)
 
 
 @deconstructible

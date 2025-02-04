@@ -42,18 +42,18 @@ from pretix.base.models.orders import CartPosition, OrderFee, QuestionAnswer
 
 
 @pytest.fixture
-def item(event):
-    return event.items.create(name="Budget Ticket", default_price=23)
+def taxrule(event):
+    return event.tax_rules.create(rate=Decimal('19.00'), code="S/standard")
+
+
+@pytest.fixture
+def item(event, taxrule):
+    return event.items.create(name="Budget Ticket", default_price=23, tax_rule=taxrule)
 
 
 @pytest.fixture
 def item2(event2):
     return event2.items.create(name="Budget Ticket", default_price=23)
-
-
-@pytest.fixture
-def taxrule(event):
-    return event.tax_rules.create(rate=Decimal('19.00'))
 
 
 @pytest.fixture
@@ -112,6 +112,7 @@ def order(event, item, taxrule, question):
             status=Order.STATUS_PENDING, secret="k24fiuwvu8kxz3y1",
             datetime=datetime.datetime(2017, 12, 1, 10, 0, 0, tzinfo=datetime.timezone.utc),
             expires=datetime.datetime(2017, 12, 10, 10, 0, 0, tzinfo=datetime.timezone.utc),
+            sales_channel=event.organizer.sales_channels.get(identifier="web"),
             total=23, locale='en'
         )
         p1 = o.payments.create(
@@ -162,12 +163,6 @@ def order(event, item, taxrule, question):
         )
         op.answers.create(question=question, answer='S')
         return o
-
-
-@pytest.fixture
-def clist_autocheckin(event):
-    c = event.checkin_lists.create(name="Default", all_products=True, auto_checkin_sales_channels=['web'])
-    return c
 
 
 ORDER_CREATE_PAYLOAD = {
@@ -230,6 +225,9 @@ def test_order_create(token_client, organizer, event, item, quota, question):
     with scopes_disabled():
         customer = organizer.customers.create()
     res['customer'] = customer.identifier
+    res['api_meta'] = {
+        'test': 1
+    }
     resp = token_client.post(
         '/api/v1/organizers/{}/events/{}/orders/'.format(
             organizer.slug, event.slug
@@ -245,10 +243,13 @@ def test_order_create(token_client, organizer, event, item, quota, question):
     assert o.locale == "en"
     assert o.total == Decimal('23.25')
     assert o.status == Order.STATUS_PENDING
-    assert o.sales_channel == "web"
+    assert o.sales_channel.identifier == "web"
     assert o.valid_if_pending
     assert o.expires > now()
     assert not o.testmode
+    assert o.api_meta == {
+        'test': 1
+    }
 
     with scopes_disabled():
         p = o.payments.first()
@@ -277,6 +278,28 @@ def test_order_create(token_client, organizer, event, item, quota, question):
     assert answ.answer == "S"
     with scopes_disabled():
         assert o.transactions.count() == 2
+
+
+@pytest.mark.django_db
+def test_order_create_duplicate_code(token_client, organizer, event, item, quota, question):
+    res = copy.deepcopy(ORDER_CREATE_PAYLOAD)
+    res['code'] = 'ABC12'
+    res['positions'][0]['item'] = item.pk
+    res['positions'][0]['answers'][0]['question'] = question.pk
+    resp = token_client.post(
+        '/api/v1/organizers/{}/events/{}/orders/'.format(
+            organizer.slug, event.slug
+        ), format='json', data=res
+    )
+    assert resp.status_code == 201
+    assert resp.data['code'] == 'ABC12'
+    resp = token_client.post(
+        '/api/v1/organizers/{}/events/{}/orders/'.format(
+            organizer.slug, event.slug
+        ), format='json', data=res
+    )
+    assert resp.status_code == 400
+    assert resp.data == {"code": ["This order code is already in use."]}
 
 
 @pytest.mark.django_db
@@ -341,10 +364,14 @@ def test_order_create_simulate(token_client, organizer, event, item, quota, ques
     question.type = Question.TYPE_CHOICE_MULTIPLE
     question.save()
     with scopes_disabled():
+        voucher = event.vouchers.create(price_mode="set", value=21.50, item=item, budget=Decimal('2.50'),
+                                        max_usages=999)
         opt = question.options.create(answer="L")
     res['positions'][0]['item'] = item.pk
     res['positions'][0]['answers'][0]['question'] = question.pk
     res['positions'][0]['answers'][0]['options'] = [opt.pk]
+    res['positions'][0]['voucher'] = voucher.code
+    del res['positions'][0]['price']
     res['simulate'] = True
     resp = token_client.post(
         '/api/v1/organizers/{}/events/{}/orders/'.format(
@@ -387,12 +414,14 @@ def test_order_create_simulate(token_client, organizer, event, item, quota, ques
                 'internal_type': '',
                 'tax_rate': '0.00',
                 'tax_value': '0.00',
+                'tax_code': None,
                 'tax_rule': None,
                 'canceled': False
             }
         ],
-        'total': '23.25',
+        'total': '21.75',
         'comment': '',
+        'api_meta': {},
         "custom_followup_at": None,
         'invoice_address': {
             'is_business': False,
@@ -416,17 +445,20 @@ def test_order_create_simulate(token_client, organizer, event, item, quota, ques
                 'positionid': 1,
                 'item': item.pk,
                 'variation': None,
-                'price': '23.00',
+                'price': '21.50',
                 'attendee_name': 'Peter',
                 'attendee_name_parts': {'full_name': 'Peter', '_scheme': 'full'},
                 'attendee_email': None,
-                'voucher': None,
-                'tax_rate': '0.00',
-                'tax_value': '0.00',
+                'voucher': voucher.pk,
+                'voucher_budget_use': '1.50',
+                'tax_rate': '19.00',
+                'tax_value': '3.43',
+                'tax_code': 'S/standard',
                 'addon_to': None,
                 'subevent': None,
                 'discount': None,
                 'checkins': [],
+                'print_logs': [],
                 'downloads': [],
                 "valid_from": None,
                 "valid_until": None,
@@ -436,7 +468,7 @@ def test_order_create_simulate(token_client, organizer, event, item, quota, ques
                      'options': [opt.pk],
                      'option_identifiers': [opt.identifier]}
                 ],
-                'tax_rule': None,
+                'tax_rule': item.tax_rule_id,
                 'pseudonymization_id': 'PREVIEW',
                 'seat': None,
                 'company': "FOOCORP",
@@ -455,6 +487,7 @@ def test_order_create_simulate(token_client, organizer, event, item, quota, ques
         'refunds': [],
         'require_approval': False,
         'sales_channel': 'web',
+        'cancellation_date': None
     }
 
 
@@ -498,56 +531,27 @@ def test_order_create_positionids_addons_simulated(token_client, organizer, even
         {'id': 0, 'order': '', 'positionid': 1, 'item': item.pk, 'variation': None, 'price': '23.00',
          'attendee_name': 'Peter', 'attendee_name_parts': {'full_name': 'Peter', '_scheme': 'full'}, 'company': None,
          'street': None, 'zipcode': None, 'city': None, 'country': None, 'state': None, 'attendee_email': None,
-         'voucher': None, 'tax_rate': '0.00', 'tax_value': '0.00', 'discount': None,
-         'addon_to': None, 'subevent': None, 'checkins': [], 'downloads': [], 'answers': [], 'tax_rule': None,
+         'voucher': None, 'tax_rate': '19.00', 'tax_code': 'S/standard', 'tax_value': '3.67', 'discount': None, 'voucher_budget_use': None,
+         'addon_to': None, 'subevent': None, 'checkins': [], 'print_logs': [], 'downloads': [], 'answers': [], 'tax_rule': item.tax_rule_id,
          'pseudonymization_id': 'PREVIEW', 'seat': None, 'canceled': False, 'valid_from': None, 'valid_until': None, 'blocked': None},
         {'id': 0, 'order': '', 'positionid': 2, 'item': item.pk, 'variation': None, 'price': '23.00',
          'attendee_name': 'Peter', 'attendee_name_parts': {'full_name': 'Peter', '_scheme': 'full'}, 'company': None,
          'street': None, 'zipcode': None, 'city': None, 'country': None, 'state': None, 'attendee_email': None,
-         'voucher': None, 'tax_rate': '0.00', 'tax_value': '0.00', 'discount': None,
-         'addon_to': 1, 'subevent': None, 'checkins': [], 'downloads': [], 'answers': [], 'tax_rule': None,
+         'voucher': None, 'tax_rate': '19.00', 'tax_code': 'S/standard', 'tax_value': '3.67', 'discount': None, 'voucher_budget_use': None,
+         'addon_to': 1, 'subevent': None, 'checkins': [], 'print_logs': [], 'downloads': [], 'answers': [], 'tax_rule': item.tax_rule_id,
          'pseudonymization_id': 'PREVIEW', 'seat': None, 'canceled': False, 'valid_from': None, 'valid_until': None, 'blocked': None}
     ]
 
 
 @pytest.mark.django_db
-def test_order_create_autocheckin(token_client, organizer, event, item, quota, question, clist_autocheckin):
-    res = copy.deepcopy(ORDER_CREATE_PAYLOAD)
-    res['positions'][0]['item'] = item.pk
-    res['positions'][0]['answers'][0]['question'] = question.pk
-    resp = token_client.post(
-        '/api/v1/organizers/{}/events/{}/orders/'.format(
-            organizer.slug, event.slug
-        ), format='json', data=res
-    )
-    assert resp.status_code == 201
-    with scopes_disabled():
-        o = Order.objects.get(code=resp.data['code'])
-        assert "web" in clist_autocheckin.auto_checkin_sales_channels
-        assert o.positions.first().checkins.first().auto_checked_in
-
-    clist_autocheckin.auto_checkin_sales_channels = []
-    clist_autocheckin.save()
-
-    resp = token_client.post(
-        '/api/v1/organizers/{}/events/{}/orders/'.format(
-            organizer.slug, event.slug
-        ), format='json', data=res
-    )
-    assert resp.status_code == 201
-    with scopes_disabled():
-        o = Order.objects.get(code=resp.data['code'])
-        assert clist_autocheckin.auto_checkin_sales_channels == []
-        assert o.positions.first().checkins.count() == 0
-
-
-@pytest.mark.django_db
-def test_order_create_require_approval(token_client, organizer, event, item, quota, question):
+def test_order_create_require_approval_free(token_client, organizer, event, item, quota, question):
     res = copy.deepcopy(ORDER_CREATE_PAYLOAD)
     res['require_approval'] = True
     res['send_email'] = True
     res['positions'][0]['item'] = item.pk
     res['positions'][0]['answers'][0]['question'] = question.pk
+    res['positions'][0]['price'] = '0.00'
+    res['fees'] = []
     djmail.outbox = []
     resp = token_client.post(
         '/api/v1/organizers/{}/events/{}/orders/'.format(
@@ -558,6 +562,7 @@ def test_order_create_require_approval(token_client, organizer, event, item, quo
     with scopes_disabled():
         o = Order.objects.get(code=resp.data['code'])
         assert o.require_approval
+        assert o.status == Order.STATUS_PENDING
     assert len(djmail.outbox) == 1
     assert djmail.outbox[0].subject == "Your order: {}".format(resp.data['code'])
     assert "approval" in djmail.outbox[0].body
@@ -595,7 +600,7 @@ def test_order_create_sales_channel_optional(token_client, organizer, event, ite
     assert resp.status_code == 201
     with scopes_disabled():
         o = Order.objects.get(code=resp.data['code'])
-    assert o.sales_channel == "web"
+    assert o.sales_channel.identifier == "web"
 
 
 @pytest.mark.django_db
@@ -610,7 +615,7 @@ def test_order_create_sales_channel_invalid(token_client, organizer, event, item
         ), format='json', data=res
     )
     assert resp.status_code == 400
-    assert resp.data == {'sales_channel': ['Unknown sales channel.']}
+    assert resp.data == {'sales_channel': ['Object with identifier=foo does not exist.']}
 
 
 @pytest.mark.django_db
@@ -1972,6 +1977,14 @@ def test_order_create_with_seat(token_client, organizer, event, item, quota, sea
         p = o.positions.first()
     assert p.seat == seat
 
+    resp = token_client.get('/api/v1/organizers/{}/events/{}/seats/{}/'.format(organizer.slug, event.slug, seat.pk))
+    assert resp.status_code == 200
+    assert resp.data['orderposition'] == p.pk
+
+    resp = token_client.get('/api/v1/organizers/{}/events/{}/seats/{}/?expand=orderposition'.format(organizer.slug, event.slug, seat.pk))
+    assert resp.status_code == 200
+    assert resp.data['orderposition']['id'] == p.pk
+
 
 @pytest.mark.django_db
 def test_order_create_with_blocked_seat_allowed(token_client, organizer, event, item, quota, seat, question):
@@ -2158,6 +2171,33 @@ def test_order_create_with_seat_consumed_from_cart(token_client, organizer, even
         o = Order.objects.get(code=resp.data['code'])
         p = o.positions.first()
     assert p.seat == seat
+
+
+@pytest.mark.django_db
+def test_order_create_with_voucher_and_price_set(token_client, organizer, event, item, quota, question):
+    with scopes_disabled():
+        voucher = event.vouchers.create(code="FOOBAR", item=item, price_mode="set", value=0, max_usages=3)
+        item.tax_rule = event.tax_rules.create(rate=19, price_includes_tax=False)
+        item.save()
+    res = copy.deepcopy(ORDER_CREATE_PAYLOAD)
+    res['positions'][0]['item'] = item.pk
+    res['positions'][0]['voucher'] = voucher.code
+    res['positions'][0]['price'] = '0.00'
+    res['positions'][0].pop("tax_rate", None)
+    res['positions'][0].pop("tax_rule", None)
+    res['positions'][0].pop("tax_value", None)
+    res['positions'][0]['answers'][0]['question'] = question.pk
+    resp = token_client.post(
+        '/api/v1/organizers/{}/events/{}/orders/'.format(
+            organizer.slug, event.slug
+        ), format='json', data=res
+    )
+    assert resp.status_code == 201
+    with scopes_disabled():
+        o = Order.objects.get(code=resp.data['code'])
+        p = o.positions.first()
+    assert p.voucher == voucher
+    assert p.price == Decimal("0.00")
 
 
 @pytest.mark.django_db
@@ -2430,6 +2470,31 @@ def test_order_create_auto_validity_with_requested_start_limitation(token_client
 
 
 @pytest.mark.django_db
+def test_order_create_auto_validity_with_requested_start_in_past(token_client, organizer, event, item, quota, question):
+    item.validity_mode = 'dynamic'
+    item.validity_dynamic_duration_minutes = 30
+    item.validity_dynamic_start_choice = True
+    item.validity_dynamic_start_choice_day_limit = 24
+    item.save()
+    res = copy.deepcopy(ORDER_CREATE_PAYLOAD)
+    res['positions'][0]['item'] = item.pk
+    res['positions'][0]['answers'][0]['question'] = question.pk
+    res['positions'][0]['requested_valid_from'] = (now() - datetime.timedelta(days=30)).isoformat()
+    del res['positions'][0]['price']
+    resp = token_client.post(
+        '/api/v1/organizers/{}/events/{}/orders/'.format(
+            organizer.slug, event.slug
+        ), format='json', data=res
+    )
+    assert resp.status_code == 201
+    with scopes_disabled():
+        o = Order.objects.get(code=resp.data['code'])
+        p = o.positions.first()
+    assert now() - datetime.timedelta(days=31) < p.valid_from <= now() - datetime.timedelta(days=29)
+    assert p.valid_until == p.valid_from + datetime.timedelta(minutes=30)
+
+
+@pytest.mark.django_db
 def test_order_create_auto_pricing(token_client, organizer, event, item, quota, question):
     res = copy.deepcopy(ORDER_CREATE_PAYLOAD)
     res['positions'][0]['item'] = item.pk
@@ -2558,6 +2623,8 @@ def test_order_create_autopricing_voucher_budget_partially(token_client, organiz
         ), format='json', data=res
     )
     assert resp.status_code == 201
+    assert resp.data["positions"][0]["voucher_budget_use"] == "1.50"
+    assert resp.data["positions"][1]["voucher_budget_use"] == "1.00"
     with scopes_disabled():
         o = Order.objects.get(code=resp.data['code'])
         p = o.positions.first()

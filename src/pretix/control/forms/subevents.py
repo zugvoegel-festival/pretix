@@ -68,6 +68,7 @@ class SubEventForm(I18nModelForm):
             'presale_end',
             'location',
             'frontpage_text',
+            'comment',
             'geo_lat',
             'geo_lon',
         ]
@@ -136,7 +137,7 @@ class SubEventBulkEditForm(I18nModelForm):
                 self.fields[k].widget.attrs['placeholder'] = ''
             self.fields[k].one_required = False
 
-        for k in ('geo_lat', 'geo_lon'):
+        for k in ('geo_lat', 'geo_lon', 'comment'):
             # scalar fields
             if k in self.mixed_values:
                 self.fields[k].widget.attrs['placeholder'] = '[{}]'.format(_('Selection contains various values'))
@@ -166,6 +167,7 @@ class SubEventBulkEditForm(I18nModelForm):
             'name',
             'location',
             'frontpage_text',
+            'comment',
             'geo_lat',
             'geo_lon',
             'is_public',
@@ -260,6 +262,8 @@ class SubEventItemForm(SubEventItemOrVariationFormMixin, forms.ModelForm):
         super().__init__(*args, **kwargs)
         self.fields['price'].widget.attrs['placeholder'] = money_filter(self.item.default_price, self.item.event.currency, hide_currency=True)
         self.fields['price'].label = str(self.item)
+        self.available_from_mode = self.item.available_from_mode
+        self.available_until_mode = self.item.available_until_mode
 
     class Meta:
         model = SubEventItem
@@ -287,6 +291,8 @@ class SubEventItemVariationForm(SubEventItemOrVariationFormMixin, forms.ModelFor
         super().__init__(*args, **kwargs)
         self.fields['price'].widget.attrs['placeholder'] = money_filter(self.variation.price, self.item.event.currency, hide_currency=True)
         self.fields['price'].label = '{} – {}'.format(str(self.item), self.variation.value)
+        self.available_from_mode = self.variation.available_from_mode
+        self.available_until_mode = self.variation.available_until_mode
 
     class Meta:
         model = SubEventItemVariation
@@ -356,6 +362,7 @@ class BulkSubEventItemVariationForm(SubEventItemVariationForm):
 class QuotaFormSet(I18nInlineFormSet):
 
     def __init__(self, *args, **kwargs):
+        self.searchable_selection = kwargs.pop('searchable_selection', None)
         self.event = kwargs.pop('event', None)
         self.locales = self.event.settings.get('locales')
         super().__init__(*args, **kwargs)
@@ -368,7 +375,7 @@ class QuotaFormSet(I18nInlineFormSet):
         kwargs['locales'] = self.locales
         kwargs['event'] = self.event
         kwargs['items'] = self.items
-        kwargs['items'] = self.items
+        kwargs['searchable_selection'] = self.searchable_selection
         return super()._construct_form(i, **kwargs)
 
     @property

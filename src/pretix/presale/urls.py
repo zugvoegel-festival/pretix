@@ -158,6 +158,9 @@ event_patterns = [
     re_path(r'^ticket/(?P<order>[^/]+)/(?P<position>\d+)/(?P<secret>[A-Za-z0-9]+)/change$',
             pretix.presale.views.order.OrderPositionChange.as_view(),
             name='event.order.position.change'),
+    re_path(r'^ticket/(?P<order>[^/]+)/(?P<position>\d+)/(?P<secret>[A-Za-z0-9]+)/modify$',
+            pretix.presale.views.order.OrderPositionModify.as_view(),
+            name='event.order.position.modify'),
 
     re_path(r'^ical/?$',
             pretix.presale.views.event.EventIcalDownload.as_view(),
@@ -172,6 +175,10 @@ event_patterns = [
     re_path(r'^widget/v1.css$', pretix.presale.views.widget.widget_css, name='event.widget.css'),
     re_path(r'^(?P<subevent>\d+)/widget/product_list$', pretix.presale.views.widget.WidgetAPIProductList.as_view(),
             name='event.widget.productlist'),
+
+    re_path(r'^theme.css$', pretix.presale.views.theme.theme_css, name='event.theme.css'),
+
+    re_path(r'timemachine/$', pretix.presale.views.event.EventTimeMachine.as_view(), name='event.timemachine'),
 
     # Account management is done on org level, but we at least need a logout
     re_path(r'^account/logout$', pretix.presale.views.customer.LogoutView.as_view(), name='organizer.customer.logout'),
@@ -190,6 +197,8 @@ organizer_patterns = [
             name='organizer.widget.productlist'),
     re_path(r'^widget/v1.css$', pretix.presale.views.widget.widget_css, name='organizer.widget.css'),
 
+    re_path(r'^theme.css$', pretix.presale.views.theme.theme_css, name='organizer.theme.css'),
+
     re_path(r'^account/login/(?P<provider>[0-9]+)/$', pretix.presale.views.customer.SSOLoginView.as_view(), name='organizer.customer.login'),
     re_path(r'^account/login/(?P<provider>[0-9]+)/return$', pretix.presale.views.customer.SSOLoginReturnView.as_view(), name='organizer.customer.login.return'),
     re_path(r'^account/login$', pretix.presale.views.customer.LoginView.as_view(), name='organizer.customer.login'),
@@ -201,10 +210,13 @@ organizer_patterns = [
     re_path(r'^account/password$', pretix.presale.views.customer.ChangePasswordView.as_view(), name='organizer.customer.password'),
     re_path(r'^account/change$', pretix.presale.views.customer.ChangeInformationView.as_view(), name='organizer.customer.change'),
     re_path(r'^account/confirmchange$', pretix.presale.views.customer.ConfirmChangeView.as_view(), name='organizer.customer.change.confirm'),
-    re_path(r'^account/membership/(?P<id>\d+)/$', pretix.presale.views.customer.MembershipUsageView.as_view(), name='organizer.customer.membership'),
+    re_path(r'^account/memberships$', pretix.presale.views.customer.MembershipView.as_view(), name='organizer.customer.memberships'),
+    re_path(r'^account/memberships/(?P<id>\d+)/$', pretix.presale.views.customer.MembershipUsageView.as_view(), name='organizer.customer.membership'),
+    re_path(r'^account/addresses$', pretix.presale.views.customer.AddressView.as_view(), name='organizer.customer.addresses'),
     re_path(r'^account/addresses/(?P<id>\d+)/delete$', pretix.presale.views.customer.AddressDeleteView.as_view(), name='organizer.customer.address.delete'),
+    re_path(r'^account/profiles$', pretix.presale.views.customer.ProfileView.as_view(), name='organizer.customer.profiles'),
     re_path(r'^account/profiles/(?P<id>\d+)/delete$', pretix.presale.views.customer.ProfileDeleteView.as_view(), name='organizer.customer.profile.delete'),
-    re_path(r'^account/$', pretix.presale.views.customer.ProfileView.as_view(), name='organizer.customer.profile'),
+    re_path(r'^account/$', pretix.presale.views.customer.OrderView.as_view(), name='organizer.customer.index'),
 
     re_path(r'^oauth2/v1/authorize$', pretix.presale.views.oidc_op.AuthorizeView.as_view(),
             name='organizer.oauth2.v1.authorize'),

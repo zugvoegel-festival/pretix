@@ -254,7 +254,7 @@ class VoucherFormTest(SoupTestMixin, TransactionTestCase):
         self._create_voucher({
             'itemvar': '%d' % self.shirt.pk,
             'block_quota': 'on'
-        }, expected_failure=True)
+        })
 
     def test_create_blocking_item_voucher_quota_full_invalid(self):
         self.quota_shirts.size = 0
@@ -744,6 +744,7 @@ class VoucherFormTest(SoupTestMixin, TransactionTestCase):
                 code='DEDUP', event=self.event, email='dummy@dummy.test',
                 status=Order.STATUS_PAID,
                 datetime=now(), expires=now() + datetime.timedelta(days=10),
+                sales_channel=self.orga.sales_channels.get(identifier="web"),
                 total=0, locale='en'
             )
 

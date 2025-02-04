@@ -41,6 +41,7 @@ The following values for ``action_types`` are valid with pretix core:
     * ``pretix.event.order.modified``
     * ``pretix.event.order.contact.changed``
     * ``pretix.event.order.changed.*``
+    * ``pretix.event.order.deleted`` (can only occur for test mode orders)
     * ``pretix.event.order.refund.created``
     * ``pretix.event.order.refund.created.externally``
     * ``pretix.event.order.refund.requested``
@@ -115,6 +116,7 @@ Endpoints
       }
 
    :query integer page: The page number in case of a multi-page result set, default is 1
+   :query boolean enabled: Only show webhooks that are or are not enabled
    :param organizer: The ``slug`` field of the organizer to fetch
    :statuscode 200: no error
    :statuscode 401: Authentication failure

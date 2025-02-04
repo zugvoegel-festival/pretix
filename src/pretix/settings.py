@@ -38,6 +38,7 @@ import logging
 import os
 import sys
 from json import loads
+from pathlib import Path
 from urllib.parse import urlparse
 
 import importlib_metadata as metadata
@@ -65,19 +66,15 @@ config = EnvOrParserConfig(_config)
 
 CONFIG_FILE = config
 DATA_DIR = config.get('pretix', 'datadir', fallback=os.environ.get('DATA_DIR', 'data'))
-LOG_DIR = os.path.join(DATA_DIR, 'logs')
+LOG_DIR = config.get('pretix', 'logdir', fallback=os.path.join(DATA_DIR, 'logs'))
 MEDIA_ROOT = os.path.join(DATA_DIR, 'media')
 PROFILE_DIR = os.path.join(DATA_DIR, 'profiles')
-CACHE_DIR = os.path.join(DATA_DIR, 'cache')
+CACHE_DIR = config.get('pretix', 'cachedir', fallback=os.path.join(DATA_DIR, 'cache'))
 
-if not os.path.exists(DATA_DIR):
-    os.mkdir(DATA_DIR)
-if not os.path.exists(LOG_DIR):
-    os.mkdir(LOG_DIR)
-if not os.path.exists(MEDIA_ROOT):
-    os.mkdir(MEDIA_ROOT)
-if not os.path.exists(CACHE_DIR):
-    os.mkdir(CACHE_DIR)
+Path(DATA_DIR).mkdir(parents=False, exist_ok=True)
+Path(LOG_DIR).mkdir(parents=False, exist_ok=True)
+Path(MEDIA_ROOT).mkdir(parents=False, exist_ok=True)
+Path(CACHE_DIR).mkdir(parents=False, exist_ok=True)
 
 if config.has_option('django', 'secret'):
     SECRET_KEY = config.get('django', 'secret')
@@ -97,9 +94,16 @@ else:
                 pass  # os.chown is not available on Windows
             f.write(SECRET_KEY)
 
+
+SECRET_KEY_FALLBACKS = []
+for i in range(10):
+    if config.has_option('django', f'secret_fallback{i}'):
+        SECRET_KEY_FALLBACKS.append(config.get('django', f'secret_fallback{i}'))
+
+
 # Adjustable settings
 
-debug_fallback = "runserver" in sys.argv
+debug_fallback = "runserver" in sys.argv or "runserver_plus" in sys.argv
 DEBUG = config.getboolean('django', 'debug', fallback=debug_fallback)
 LOG_CSP = config.getboolean('pretix', 'csp_log', fallback=False)
 CSP_ADDITIONAL_HEADER = config.get('pretix', 'csp_additional_header', fallback='')
@@ -142,6 +146,8 @@ if USE_DATABASE_TLS or USE_DATABASE_MTLS:
 
     db_options.update(tls_config)
 
+db_disable_server_side_cursors = db_backend == 'postgresql' and config.getboolean('database', 'disable_server_side_cursors', fallback=False)
+
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.' + db_backend,
@@ -152,6 +158,7 @@ DATABASES = {
         'PORT': config.get('database', 'port', fallback=''),
         'CONN_MAX_AGE': 0 if db_backend == 'sqlite3' else 120,
         'CONN_HEALTH_CHECKS': db_backend != 'sqlite3',  # Will only be used from Django 4.1 onwards
+        'DISABLE_SERVER_SIDE_CURSORS': db_disable_server_side_cursors,
         'OPTIONS': db_options,
         'TEST': {}
     }
@@ -181,7 +188,15 @@ PRETIX_REGISTRATION = config.getboolean('pretix', 'registration', fallback=False
 PRETIX_PASSWORD_RESET = config.getboolean('pretix', 'password_reset', fallback=True)
 PRETIX_LONG_SESSIONS = config.getboolean('pretix', 'long_sessions', fallback=True)
 PRETIX_ADMIN_AUDIT_COMMENTS = config.getboolean('pretix', 'audit_comments', fallback=False)
-PRETIX_OBLIGATORY_2FA = config.getboolean('pretix', 'obligatory_2fa', fallback=False)
+
+_obligatory_2fa = config.get('pretix', 'obligatory_2fa', fallback="False")
+_mapping = {'1': True, 'yes': True, 'true': True, 'on': True, '0': False, 'no': False, 'false': False, 'off': False, 'staff': 'staff'}
+if _obligatory_2fa.lower() not in _mapping:
+    raise ImproperlyConfigured(
+        f"Value '{_obligatory_2fa}' not allowed for configuration key pretix.obligatory_2fa."
+    )
+PRETIX_OBLIGATORY_2FA = _mapping[_obligatory_2fa.lower()]
+
 PRETIX_SESSION_TIMEOUT_RELATIVE = 3600 * 3
 PRETIX_SESSION_TIMEOUT_ABSOLUTE = 3600 * 12
 
@@ -201,7 +216,7 @@ if config.getboolean('pretix', 'trust_x_forwarded_proto', fallback=False):
     SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
 PRETIX_PLUGINS_DEFAULT = config.get('pretix', 'plugins_default',
-                                    fallback='pretix.plugins.sendmail,pretix.plugins.statistics,pretix.plugins.checkinlists,pretix.plugins.autocheckin')
+                                    fallback='pretix.plugins.sendmail,pretix.plugins.statistics,pretix.plugins.checkinlists')
 PRETIX_PLUGINS_EXCLUDE = config.get('pretix', 'plugins_exclude', fallback='').split(',')
 PRETIX_PLUGINS_SHOW_META = config.getboolean('pretix', 'plugins_show_meta', fallback=True)
 
@@ -332,6 +347,7 @@ if HAS_CELERY:
         CELERY_BROKER_TRANSPORT_OPTIONS = loads(config.get('celery', 'broker_transport_options'))
     if HAS_CELERY_BACKEND_TRANSPORT_OPTS:
         CELERY_RESULT_BACKEND_TRANSPORT_OPTIONS = loads(config.get('celery', 'backend_transport_options'))
+    CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
 else:
     CELERY_TASK_ALWAYS_EAGER = True
 
@@ -418,14 +434,6 @@ REST_FRAMEWORK = {
     'UNICODE_JSON': False
 }
 
-
-CORE_MODULES = {
-    "pretix.base",
-    "pretix.presale",
-    "pretix.control",
-    "pretix.plugins.checkinlists",
-    "pretix.plugins.reports",
-}
 
 MIDDLEWARE = [
     'pretix.helpers.logs.RequestIdMiddleware',
@@ -618,15 +626,21 @@ LOGGING = {
 
 SENTRY_ENABLED = False
 if config.has_option('sentry', 'dsn') and not any(c in sys.argv for c in ('shell', 'shell_scoped', 'shell_plus')):
+    import django.db.models.signals
     import sentry_sdk
     from sentry_sdk.integrations.celery import CeleryIntegration
     from sentry_sdk.integrations.logging import (
         LoggingIntegration, ignore_logger,
     )
+    from sentry_sdk.scrubber import EventScrubber, DEFAULT_DENYLIST
 
     from .sentry import PretixSentryIntegration, setup_custom_filters
 
     SENTRY_TOKEN = config.get('sentry', 'traces_sample_token', fallback='')
+    pretix_denylist = DEFAULT_DENYLIST + [
+        "access_token",
+        "sentry_dsn",
+    ]
 
     def traces_sampler(sampling_context):
         qs = sampling_context.get('wsgi_environ', {}).get('QUERY_STRING', '')
@@ -638,7 +652,12 @@ if config.has_option('sentry', 'dsn') and not any(c in sys.argv for c in ('shell
     sentry_sdk.init(
         dsn=config.get('sentry', 'dsn'),
         integrations=[
-            PretixSentryIntegration(),
+            PretixSentryIntegration(
+                signals_denylist=[
+                    django.db.models.signals.pre_init,
+                    django.db.models.signals.post_init,
+                ]
+            ),
             CeleryIntegration(),
             LoggingIntegration(
                 level=logging.INFO,
@@ -648,6 +667,7 @@ if config.has_option('sentry', 'dsn') and not any(c in sys.argv for c in ('shell
         traces_sampler=traces_sampler,
         environment=urlparse(SITE_URL).netloc,
         release=__version__,
+        event_scrubber=EventScrubber(denylist=pretix_denylist, recursive=True),
         send_default_pii=False,
         propagate_traces=False,  # see https://github.com/getsentry/sentry-python/issues/1717
     )
@@ -683,21 +703,74 @@ CELERY_TASK_ROUTES = ([
 BOOTSTRAP3 = {
     'success_css_class': '',
     'field_renderers': {
-        'default': 'pretix.base.forms.renderers.FieldRenderer',
-        'inline': 'pretix.base.forms.renderers.InlineFieldRenderer',
+        'default': 'bootstrap3.renderers.FieldRenderer',
+        'inline': 'bootstrap3.renderers.InlineFieldRenderer',
         'control': 'pretix.control.forms.renderers.ControlFieldRenderer',
+        'control_with_visibility': 'pretix.control.forms.renderers.ControlFieldWithVisibilityRenderer',
         'bulkedit': 'pretix.control.forms.renderers.BulkEditFieldRenderer',
         'bulkedit_inline': 'pretix.control.forms.renderers.InlineBulkEditFieldRenderer',
         'checkout': 'pretix.presale.forms.renderers.CheckoutFieldRenderer',
     },
 }
 
+PASSWORD_HASHERS = [
+    # Note that when updating this, all user passwords will be re-hashed on next login, however,
+    # the HistoricPassword model will not be changed automatically. In case a serious issue with a hasher
+    # comes to light, dropping the contents of the HistoricPassword table might be the more risk-adequate
+    # decision.
+    *(
+        ["django.contrib.auth.hashers.Argon2PasswordHasher"]
+        if config.getboolean('django', 'passwords_argon2', fallback=True)
+        else []
+    ),
+    "django.contrib.auth.hashers.PBKDF2PasswordHasher",
+    "django.contrib.auth.hashers.PBKDF2SHA1PasswordHasher",
+    "django.contrib.auth.hashers.BCryptSHA256PasswordHasher",
+    "django.contrib.auth.hashers.ScryptPasswordHasher",
+]
 AUTH_PASSWORD_VALIDATORS = [
     {
         'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator',
     },
     {
-        'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator',
+        "NAME": "django.contrib.auth.password_validation.MinimumLengthValidator",
+        "OPTIONS": {
+            # To fulfill per PCI DSS requirement 8.3.6
+            "min_length": 12,
+        },
+    },
+    {
+        # To fulfill per PCI DSS requirement 8.3.6
+        'NAME': 'pretix.base.auth.NumericAndAlphabeticPasswordValidator',
+    },
+    {
+        "NAME": "pretix.base.auth.HistoryPasswordValidator",
+        "OPTIONS": {
+            # To fulfill per PCI DSS requirement 8.3.7
+            "history_length": 4,
+        },
+    },
+    {
+        'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator',
+    },
+    {
+        'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator',
+    },
+]
+CUSTOMER_AUTH_PASSWORD_VALIDATORS = [
+    # For customer accounts, we apply a little less strict requirements to provide a risk-adequate
+    # user experience.
+    {
+        'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator',
+    },
+    {
+        "NAME": "django.contrib.auth.password_validation.MinimumLengthValidator",
+        "OPTIONS": {
+            "min_length": 8,
+        },
+    },
+    {
+        'NAME': 'pretix.base.auth.NumericAndAlphabeticPasswordValidator',
     },
     {
         'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator',

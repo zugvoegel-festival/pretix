@@ -42,8 +42,8 @@ from dateutil.tz import datetime_exists
 from django.core.files import File
 from django.db import IntegrityError, transaction
 from django.db.models import (
-    BooleanField, Count, ExpressionWrapper, F, IntegerField, Max, Min,
-    OuterRef, Q, Subquery, Value,
+    BooleanField, Case, Count, ExpressionWrapper, F, IntegerField, Max, Min,
+    OuterRef, Q, Subquery, TextField, Value, When,
 )
 from django.db.models.functions import Coalesce, TruncDate
 from django.dispatch import receiver
@@ -57,7 +57,7 @@ from pretix.base.models import (
     Checkin, CheckinList, Device, Event, Gate, Item, ItemVariation, Order,
     OrderPosition, QuestionOption,
 )
-from pretix.base.signals import checkin_created, order_placed, periodic_task
+from pretix.base.signals import checkin_created, periodic_task
 from pretix.helpers import OF_SELF
 from pretix.helpers.jsonlogic import Logic
 from pretix.helpers.jsonlogic_boolalg import convert_to_dnf
@@ -273,6 +273,14 @@ def _logic_explain(rules, ev, rule_data, now_dt=None):
                 var_texts[vname] = _('Only allowed before {datetime}').format(datetime=compare_to_text)
             elif operator == 'isAfter':
                 var_texts[vname] = _('Only allowed after {datetime}').format(datetime=compare_to_text)
+        elif var == 'entry_status':
+            var_weights[vname] = (20, 0)
+            if operator == '==' and rhs[0] == 'present':
+                var_texts[vname] = _('Attendee is checked out')
+            elif operator == '==' and rhs[0] == 'absent':
+                var_texts[vname] = _('Attendee is already checked in')
+            else:
+                var_texts[vname] = f'{var} not {operator} {rhs}'
         elif var == 'product' or var == 'variation':
             var_weights[vname] = (1000, 0)
             var_texts[vname] = _('Ticket type not allowed')
@@ -508,6 +516,13 @@ class LazyRuleVars:
             ).values('day').distinct().count()
 
     @cached_property
+    def entry_status(self):
+        last_checkin = self._position.checkins.filter(list=self._clist).order_by('datetime').last()
+        if not last_checkin or last_checkin.type == Checkin.TYPE_EXIT:
+            return "absent"
+        return "present"
+
+    @cached_property
     def minutes_since_last_entry(self):
         tz = self._clist.event.timezone
         with override(tz):
@@ -569,6 +584,8 @@ class SQLLogic:
                                'entries_days_since', 'entries_days_before'}
 
     def operation_to_expression(self, rule):
+        if isinstance(rule, str):
+            return Value(rule)
         if not isinstance(rule, dict):
             return rule
 
@@ -769,6 +786,25 @@ class SQLLogic:
                     MinutesSince(sq_last_entry),
                     Value(-1),
                     output_field=IntegerField()
+                )
+            elif values[0] == 'entry_status':
+                sq_last_checkin = Subquery(
+                    Checkin.objects.filter(
+                        position_id=OuterRef('pk'),
+                        list_id=self.list.pk,
+                    ).order_by('-datetime').values('type')[:1]
+                )
+
+                return Case(
+                    When(
+                        condition=Equal(
+                            sq_last_checkin,
+                            Value(Checkin.TYPE_ENTRY)
+                        ),
+                        then=Value("present"),
+                    ),
+                    default=Value("absent"),
+                    output_field=TextField()
                 )
         else:
             raise ValueError(f'Unknown operator {operator}')
@@ -1118,24 +1154,7 @@ def perform_checkin(op: OrderPosition, clist: CheckinList, given_answers: dict, 
             )
 
 
-@receiver(order_placed, dispatch_uid="autocheckin_order_placed")
-def order_placed(sender, **kwargs):
-    order = kwargs['order']
-    event = sender
-
-    cls = list(event.checkin_lists.filter(auto_checkin_sales_channels__contains=order.sales_channel).prefetch_related(
-        'limit_products'))
-    if not cls:
-        return
-    for op in order.positions.all():
-        for cl in cls:
-            if cl.all_products or op.item_id in {i.pk for i in cl.limit_products.all()}:
-                if not cl.subevent_id or cl.subevent_id == op.subevent_id:
-                    ci = Checkin.objects.create(position=op, list=cl, auto_checked_in=True, type=Checkin.TYPE_ENTRY)
-                    checkin_created.send(event, checkin=ci)
-
-
-@receiver(periodic_task, dispatch_uid="autocheckin_exit_all")
+@receiver(periodic_task, dispatch_uid="autocheckout_exit_all")
 @scopes_disabled()
 def process_exit_all(sender, **kwargs):
     qs = CheckinList.objects.filter(
@@ -1146,10 +1165,11 @@ def process_exit_all(sender, **kwargs):
         positions = cl.positions_inside_query(ignore_status=True, at_time=cl.exit_all_at)
         for p in positions:
             with scope(organizer=cl.event.organizer):
-                ci = Checkin.objects.create(
+                ci, created = Checkin.objects.get_or_create(
                     position=p, list=cl, auto_checked_in=True, type=Checkin.TYPE_EXIT, datetime=cl.exit_all_at
                 )
-                checkin_created.send(cl.event, checkin=ci)
+                if created:
+                    checkin_created.send(cl.event, checkin=ci)
         d = cl.exit_all_at.astimezone(cl.event.timezone)
         if cl.event.settings.get(f'autocheckin_dst_hack_{cl.pk}'):  # move time back if yesterday was DST switch
             d -= timedelta(hours=1)

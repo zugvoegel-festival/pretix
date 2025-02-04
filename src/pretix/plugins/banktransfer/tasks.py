@@ -162,6 +162,21 @@ def _handle_transaction(trans: BankTransaction, matches: tuple, event: Event = N
     else:
         trans.order = orders[0]
 
+    if len(orders) > 1:
+        # Multi-match! Can we split this automatically?
+        order_pending_sum = sum(o.pending_sum for o in orders)
+        if order_pending_sum != trans.amount:
+            # we can't :( this needs to be dealt with by a human
+            trans.state = BankTransaction.STATE_NOMATCH
+            trans.message = gettext_noop('Automatic split to multiple orders not possible.')
+            trans.save()
+            return
+
+        # we can!
+        splits = [(o, o.pending_sum) for o in orders]
+    else:
+        splits = [(orders[0], trans.amount)]
+
     for o in orders:
         if o.status == Order.STATUS_PAID and o.pending_sum <= Decimal('0.00'):
             trans.state = BankTransaction.STATE_DUPLICATE
@@ -178,21 +193,6 @@ def _handle_transaction(trans: BankTransaction, matches: tuple, event: Event = N
             trans.message = gettext_noop('Currencies do not match.')
             trans.save()
             return
-
-    if len(orders) > 1:
-        # Multi-match! Can we split this automatically?
-        order_pending_sum = sum(o.pending_sum for o in orders)
-        if order_pending_sum != trans.amount:
-            # we can't :( this needs to be dealt with by a human
-            trans.state = BankTransaction.STATE_NOMATCH
-            trans.message = gettext_noop('Automatic split to multiple orders not possible.')
-            trans.save()
-            return
-
-        # we can!
-        splits = [(o, o.pending_sum) for o in orders]
-    else:
-        splits = [(orders[0], trans.amount)]
 
     trans.state = BankTransaction.STATE_VALID
     for order, amount in splits:
@@ -267,8 +267,9 @@ def _handle_transaction(trans: BankTransaction, matches: tuple, event: Event = N
 
         if created:
             # We're perform a payment method switching on-demand here
-            old_fee, new_fee, fee, p = change_payment_provider(order, p.payment_provider, p.amount,
-                                                               new_payment=p, create_log=False)  # noqa
+            old_fee, new_fee, fee, p, new_invoice_created = change_payment_provider(
+                order, p.payment_provider, p.amount, new_payment=p, create_log=False
+            )  # noqa
             if fee:
                 p.fee = fee
                 p.save(update_fields=['fee'])

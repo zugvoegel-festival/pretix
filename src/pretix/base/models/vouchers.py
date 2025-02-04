@@ -251,7 +251,8 @@ class Voucher(LoggedModel):
         null=True, blank=True,
         on_delete=models.PROTECT,  # We use a fake version of SET_NULL in Item.delete()
         help_text=_(
-            "This product is added to the user's cart if the voucher is redeemed."
+            "This product is added to the user's cart if the voucher is redeemed. Instead of a specific product, you "
+            "can also select a quota. In this case, all products assigned to this quota can be selected."
         )
     )
     variation = models.ForeignKey(
@@ -350,9 +351,6 @@ class Voucher(LoggedModel):
                                         'variations.'))
             if variation and not item.variations.filter(pk=variation.pk).exists():
                 raise ValidationError(_('This variation does not belong to this product.'))
-            if item.has_variations and not variation and data.get('block_quota'):
-                raise ValidationError(_('You can only block quota if you specify a specific product variation. '
-                                        'Otherwise it might be unclear which quotas to block.'))
             if item.category and item.category.is_addon:
                 raise ValidationError(_('It is currently not possible to create vouchers for add-on products.'))
         elif block_quota:
@@ -372,10 +370,11 @@ class Voucher(LoggedModel):
                     'redeemed': redeemed
                 }
             )
-        if data.get('max_usages', 1) < data.get('min_usages', 1):
-            raise ValidationError(
-                _('The maximum number of usages may not be lower than the minimum number of usages.'),
-            )
+        if data.get('min_usages') is not None:
+            if data.get('max_usages', 1) < data.get('min_usages', 1):
+                raise ValidationError(
+                    _('The maximum number of usages may not be lower than the minimum number of usages.'),
+                )
 
     @staticmethod
     def clean_subevent(data, event):
@@ -430,7 +429,15 @@ class Voucher(LoggedModel):
             elif old_instance.variation:
                 quotas |= set(old_instance.variation.quotas.filter(subevent=old_instance.subevent))
             elif old_instance.item:
-                quotas |= set(old_instance.item.quotas.filter(subevent=old_instance.subevent))
+                if old_instance.item.has_variations:
+                    quotas |= set(
+                        Quota.objects.filter(pk__in=Quota.variations.through.objects.filter(
+                            itemvariation__item=old_instance.item,
+                            quota__subevent=old_instance.subevent,
+                        ).values('quota_id'))
+                    )
+                else:
+                    quotas |= set(old_instance.item.quotas.filter(subevent=old_instance.subevent))
         return quotas
 
     @staticmethod
@@ -445,13 +452,19 @@ class Voucher(LoggedModel):
 
         if quota:
             new_quotas = {quota}
-        elif item and item.has_variations and not variation:
-            raise ValidationError(_('You can only block quota if you specify a specific product variation. '
-                                    'Otherwise it might be unclear which quotas to block.'))
         elif item and variation:
             new_quotas = set(variation.quotas.filter(subevent=data.get('subevent')))
         elif item and not item.has_variations:
             new_quotas = set(item.quotas.filter(subevent=data.get('subevent')))
+        elif item and item.has_variations:
+            new_quotas = set(
+                Quota.objects.filter(
+                    pk__in=Quota.variations.through.objects.filter(
+                        itemvariation__item=item,
+                        quota__subevent=data.get('subevent'),
+                    ).values('quota_id')
+                )
+            )
         else:
             raise ValidationError(_('You need to select a specific product or quota if this voucher should reserve '
                                     'tickets.'))
@@ -504,9 +517,6 @@ class Voucher(LoggedModel):
 
         if item and seat.product != item:
             raise ValidationError(_('You need to choose the product "{prod}" for this seat.').format(prod=seat.product))
-
-        if not seat.is_available(ignore_voucher_id=pk):
-            raise ValidationError(_('The seat "{id}" is already sold or currently blocked.').format(id=seat.seat_guid))
 
         return seat
 

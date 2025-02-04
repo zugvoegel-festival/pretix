@@ -34,6 +34,7 @@ internal_id                           string                     Can be used for
 contact_name                          string                     Contact person (or ``null``)
 contact_name_parts                    object of strings          Decomposition of contact name (i.e. given name, family name)
 contact_email                         string                     Contact person email address (or ``null``)
+contact_cc_email                      string                     Copy email addresses, can be multiple separated by comma (or ``null``)
 booth                                 string                     Booth number (or ``null``). Maximum 100 characters.
 locale                                string                     Locale for communication with the exhibitor.
 access_code                           string                     Access code for the exhibitor to access their data or use the lead scanning app (read-only).
@@ -44,6 +45,8 @@ allow_voucher_access                  boolean                    Enables access 
 lead_scanning_scope_by_device         string                     Enables lead scanning to be handled as one lead per attendee
                                                                  per scanning device, instead of only per exhibitor.
 comment                               string                     Internal comment, not shown to exhibitor
+exhibitor_tags                        list of strings            Internal tags to categorize exhibitors, not shown to exhibitor.
+                                                                 The tags need to be created through the web interface currently.
 ===================================== ========================== =======================================================
 
 You can also access the scanned leads through the API which contains the following public fields:
@@ -109,6 +112,7 @@ Endpoints
                 "title": "Dr"
             },
             "contact_email": "johnson@as.example.org",
+            "contact_cc_email": "miller@as.example.org,smith@as.example.org",
             "booth": "A2",
             "locale": "de",
             "access_code": "VKHZ2FU84",
@@ -117,7 +121,8 @@ Endpoints
             "allow_lead_scanning": true,
             "allow_lead_access": true,
             "allow_voucher_access": true,
-            "comment": ""
+            "comment": "",
+            "exhibitor_tags": []
           }
         ]
       }
@@ -162,6 +167,7 @@ Endpoints
             "title": "Dr"
         },
         "contact_email": "johnson@as.example.org",
+        "contact_cc_email": "miller@as.example.org,smith@as.example.org",
         "booth": "A2",
         "locale": "de",
         "access_code": "VKHZ2FU84",
@@ -170,7 +176,8 @@ Endpoints
         "allow_lead_scanning": true,
         "allow_lead_access": true,
         "allow_voucher_access": true,
-        "comment": ""
+        "comment": "",
+        "exhibitor_tags": []
       }
 
    :param organizer: The ``slug`` field of the organizer to fetch
@@ -365,12 +372,16 @@ Endpoints
             "title": "Dr"
         },
         "contact_email": "johnson@as.example.org",
+        "contact_cc_email": "miller@as.example.org,smith@as.example.org",
         "booth": "A2",
         "locale": "de",
         "allow_lead_scanning": true,
         "allow_lead_access": true,
         "allow_voucher_access": true,
-        "comment": ""
+        "comment": "",
+        "exhibitor_tags": [
+          "Gold Sponsor"
+        ]
       }
 
    **Example response**:
@@ -394,6 +405,7 @@ Endpoints
             "title": "Dr"
         },
         "contact_email": "johnson@as.example.org",
+        "contact_cc_email": "miller@as.example.org,smith@as.example.org",
         "booth": "A2",
         "locale": "de",
         "access_code": "VKHZ2FU84",
@@ -402,7 +414,10 @@ Endpoints
         "allow_lead_scanning": true,
         "allow_lead_access": true,
         "allow_voucher_access": true,
-        "comment": ""
+        "comment": "",
+        "exhibitor_tags": [
+          "Gold Sponsor"
+        ]
       }
 
    :param organizer: The ``slug`` field of the organizer to create new exhibitor for
@@ -454,6 +469,7 @@ Endpoints
             "title": "Dr"
         },
         "contact_email": "johnson@as.example.org",
+        "contact_cc_email": "miller@as.example.org,smith@as.example.org",
         "booth": "A2",
         "locale": "de",
         "access_code": "VKHZ2FU84",
@@ -462,7 +478,10 @@ Endpoints
         "allow_lead_scanning": true,
         "allow_lead_access": true,
         "allow_voucher_access": true,
-        "comment": ""
+        "comment": "",
+        "exhibitor_tags": [
+          "Gold Sponsor"
+        ]
       }
 
    :param organizer: The ``slug`` field of the organizer to modify

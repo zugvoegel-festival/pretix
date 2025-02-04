@@ -74,7 +74,8 @@ def dashboard_env():
         code='FOO', event=event, email='dummy@dummy.test',
         status=Order.STATUS_PAID,
         datetime=now(), expires=now() + timedelta(days=10),
-        total=33, locale='en'
+        total=33, locale='en',
+        sales_channel=event.organizer.sales_channels.get(identifier="web"),
     )
     OrderPosition.objects.create(
         order=order_paid,
@@ -105,10 +106,11 @@ def test_dashboard(dashboard_env):
 def test_dashboard_pending_not_count(dashboard_env):
     c = checkin_widget(dashboard_env[0])
     order_pending = Order.objects.create(
-        code='FOO', event=dashboard_env[0], email='dummy@dummy.test',
+        code='BAR', event=dashboard_env[0], email='dummy@dummy.test',
         status=Order.STATUS_PENDING,
         datetime=now(), expires=now() + timedelta(days=10),
-        total=23, locale='en'
+        total=23, locale='en',
+        sales_channel=dashboard_env[0].organizer.sales_channels.get(identifier="web"),
     )
     OrderPosition.objects.create(
         order=order_pending,
@@ -161,25 +163,29 @@ def checkin_list_env():
         code='PENDING', event=event, email='dummy@dummy.test',
         status=Order.STATUS_PENDING,
         datetime=now(), expires=now() + timedelta(days=10),
-        total=23, locale='en'
+        total=23, locale='en',
+        sales_channel=orga.sales_channels.get(identifier="web"),
     )
     order_a1 = Order.objects.create(
         code='A1', event=event, email='a1dummy@dummy.test',
         status=Order.STATUS_PAID,
         datetime=now(), expires=now() + timedelta(days=10),
-        total=33, locale='en'
+        total=33, locale='en',
+        sales_channel=orga.sales_channels.get(identifier="web"),
     )
     order_a2 = Order.objects.create(
         code='A2', event=event, email='a2dummy@dummy.test',
         status=Order.STATUS_PAID,
         datetime=now(), expires=now() + timedelta(days=10),
-        total=23, locale='en'
+        total=23, locale='en',
+        sales_channel=orga.sales_channels.get(identifier="web"),
     )
     order_a3 = Order.objects.create(
         code='A3', event=event, email='a3dummy@dummy.test',
         status=Order.STATUS_PAID,
         datetime=now(), expires=now() + timedelta(days=10),
-        total=23, locale='en'
+        total=23, locale='en',
+        sales_channel=orga.sales_channels.get(identifier="web"),
     )
 
     # order position
@@ -222,6 +228,7 @@ def checkin_list_env():
     # checkin
     Checkin.objects.create(position=op_a1_ticket, datetime=now() + timedelta(minutes=1), list=cl)
     Checkin.objects.create(position=op_a3_ticket, list=cl)
+    Checkin.objects.create(position=op_a3_ticket, list=cl, type="exit")
 
     return event, user, orga, [item_ticket, item_mascot], [order_pending, order_a1, order_a2, order_a3], \
         [op_pending_ticket, op_a1_ticket, op_a1_mascot, op_a2_ticket, op_a3_ticket], cl
@@ -254,8 +261,10 @@ def test_checkins_list_ordering(client, checkin_list_env, order_key, expected):
 @pytest.mark.django_db
 @pytest.mark.parametrize("query, expected", [
     ('status=&item=&user=', ['A1Ticket', 'A1Mascot', 'A2Ticket', 'A3Ticket']),
-    ('status=1&item=&user=', ['A1Ticket', 'A3Ticket']),
     ('status=0&item=&user=', ['A1Mascot', 'A2Ticket']),
+    ('status=1&item=&user=', ['A1Ticket', 'A3Ticket']),
+    ('status=2&item=&user=', ['A1Ticket']),
+    ('status=3&item=&user=', ['A3Ticket']),
     ('status=&item=&user=a3dummy', ['A3Ticket']),  # match order email
     ('status=&item=&user=a3dummy', ['A3Ticket']),  # match order email,
     ('status=&item=&user=a4', ['A3Ticket']),  # match attendee name
@@ -381,19 +390,22 @@ def checkin_list_with_addon_env():
         code='PENDING', event=event, email='dummy@dummy.test',
         status=Order.STATUS_PENDING,
         datetime=now(), expires=now() + timedelta(days=10),
-        total=23, locale='en'
+        total=23, locale='en',
+        sales_channel=orga.sales_channels.get(identifier="web"),
     )
     order_a1 = Order.objects.create(
         code='A1', event=event, email='a1dummy@dummy.test',
         status=Order.STATUS_PAID,
         datetime=now(), expires=now() + timedelta(days=10),
-        total=33, locale='en'
+        total=33, locale='en',
+        sales_channel=orga.sales_channels.get(identifier="web"),
     )
     order_a2 = Order.objects.create(
         code='A2', event=event, email='a2dummy@dummy.test',
         status=Order.STATUS_PAID,
         datetime=now(), expires=now() + timedelta(days=10),
-        total=23, locale='en'
+        total=23, locale='en',
+        sales_channel=orga.sales_channels.get(identifier="web"),
     )
 
     # order position

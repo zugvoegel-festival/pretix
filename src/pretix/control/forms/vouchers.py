@@ -45,8 +45,11 @@ from django.utils.translation import gettext_lazy as _, pgettext_lazy
 from django_scopes.forms import SafeModelChoiceField
 
 from pretix.base.email import get_available_placeholders
-from pretix.base.forms import I18nModelForm, PlaceholderValidator
+from pretix.base.forms import (
+    I18nModelForm, MarkdownTextarea, PlaceholderValidator,
+)
 from pretix.base.forms.widgets import format_placeholders_help_text
+from pretix.base.i18n import language
 from pretix.base.models import Item, Voucher
 from pretix.control.forms import SplitDateTimeField, SplitDateTimePickerWidget
 from pretix.control.forms.widgets import Select2, Select2ItemVarQuota
@@ -63,7 +66,8 @@ class VoucherForm(I18nModelForm):
     itemvar = FakeChoiceField(
         label=_("Product"),
         help_text=_(
-            "This product is added to the user's cart if the voucher is redeemed."
+            "This product is added to the user's cart if the voucher is redeemed. Instead of a specific product, you "
+            "can also select a quota. In this case, all products assigned to this quota can be selected."
         ),
         required=True
     )
@@ -87,8 +91,10 @@ class VoucherForm(I18nModelForm):
     def __init__(self, *args, **kwargs):
         instance = kwargs.get('instance')
         initial = kwargs.get('initial')
+        self.initial_instance_data = None
         if instance:
-            self.initial_instance_data = modelcopy(instance)
+            if instance.pk:
+                self.initial_instance_data = modelcopy(instance)
             try:
                 if instance.variation:
                     initial['itemvar'] = '%d-%d' % (instance.item.pk, instance.variation.pk)
@@ -98,8 +104,6 @@ class VoucherForm(I18nModelForm):
                     initial['itemvar'] = 'q-%d' % instance.quota.pk
             except Item.DoesNotExist:
                 pass
-        else:
-            self.initial_instance_data = None
         super().__init__(*args, **kwargs)
 
         if instance.event.has_subevents:
@@ -231,15 +235,18 @@ class VoucherForm(I18nModelForm):
         )
         if check_quota:
             Voucher.clean_quota_check(
-                data, cnt, self.initial_instance_data, self.instance.event,
-                self.instance.quota, self.instance.item, self.instance.variation
+                data, cnt, self.initial_instance_data,
+                self.instance.event, self.instance.quota, self.instance.item, self.instance.variation
             )
         Voucher.clean_voucher_code(data, self.instance.event, self.instance.pk)
-        if 'seat' in self.fields and data.get('seat'):
-            self.instance.seat = Voucher.clean_seat_id(
-                data, self.instance.item, self.instance.quota, self.instance.event, self.instance.pk
-            )
-            self.instance.item = self.instance.seat.product
+        if 'seat' in self.fields:
+            if data.get('seat'):
+                self.instance.seat = Voucher.clean_seat_id(
+                    data, self.instance.item, self.instance.quota, self.instance.event, self.instance.pk
+                )
+                self.instance.item = self.instance.seat.product
+            else:
+                self.instance.seat = None
 
         voucher_form_validation.send(sender=self.instance.event, form=self, data=data)
 
@@ -270,7 +277,7 @@ class VoucherBulkForm(VoucherForm):
     )
     send_message = forms.CharField(
         label=_("Message"),
-        widget=forms.Textarea(attrs={'data-display-dependency': '#id_send'}),
+        widget=MarkdownTextarea(attrs={'data-display-dependency': '#id_send'}),
         required=False,
         initial=_('Hello,\n\n'
                   'with this email, we\'re sending you one or more vouchers for {event}:\n\n{voucher_list}\n\n'
@@ -286,8 +293,9 @@ class VoucherBulkForm(VoucherForm):
             )
         }),
         required=False,
-        help_text=_('You can either supply a list of email addresses with one email address per line, or a CSV file with a title column '
-                    'and one or more of the columns "email", "number", "name", or "tag".')
+        help_text=_('You can either supply a list of email addresses with one email address per line, or the contents '
+                    'of a CSV file with a title column and one or more of the columns "email", "number", "name", '
+                    'or "tag".')
     )
     Recipient = namedtuple('Recipient', 'email number name tag')
 
@@ -329,6 +337,11 @@ class VoucherBulkForm(VoucherForm):
         super().__init__(*args, **kwargs)
         self._set_field_placeholders('send_subject', ['event', 'name'])
         self._set_field_placeholders('send_message', ['event', 'voucher_list', 'name'])
+
+        with language(self.instance.event.settings.locale, self.instance.event.settings.region):
+            for f in ("send_subject", "send_message"):
+                self.fields[f].initial = str(self.fields[f].initial)
+
         if 'seat' in self.fields:
             self.fields['seats'] = forms.CharField(
                 label=_("Specific seat IDs"),
@@ -363,14 +376,14 @@ class VoucherBulkForm(VoucherForm):
                 raise ValidationError(_('CSV input contains an unknown field with the header "{header}".').format(header=unknown_fields[0]))
             for i, row in enumerate(reader):
                 try:
-                    EmailValidator()(row['email'])
+                    EmailValidator()(row['email'].strip())
                 except ValidationError as err:
-                    raise ValidationError(_('{value} is not a valid email address.').format(value=row['email'])) from err
+                    raise ValidationError(_('{value} is not a valid email address.').format(value=row['email'].strip())) from err
                 try:
                     res.append(self.Recipient(
                         name=row.get('name', ''),
                         email=row['email'].strip(),
-                        number=int(row.get('number', 1)),
+                        number=int(row.get('number', 1) or ""),
                         tag=row.get('tag', None)
                     ))
                 except ValueError as err:

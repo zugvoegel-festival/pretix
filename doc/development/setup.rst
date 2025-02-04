@@ -136,9 +136,7 @@ It is a good idea to put this command into your git hook ``.git/hooks/pre-commit
 for example, to check for any errors in any staged files when committing::
 
     #!/bin/bash
-    cd $GIT_DIR/../src
-    export GIT_WORK_TREE=../
-    export GIT_DIR=../.git
+
     source ../env/bin/activate  # Adjust to however you activate your virtual environment
     for file in $(git diff --cached --name-only | grep -E '\.py$' | grep -Ev "migrations|mt940\.py|pretix/settings\.py|make_testdata\.py|testutils/settings\.py|tests/settings\.py|pretix/base/models/__init__\.py|.*_pb2\.py")
     do
@@ -210,6 +208,16 @@ with the documentation a lot, you might find it useful to use sphinx-autobuild::
 
 Then, go to http://localhost:8081 for a version of the documentation that automatically re-builds
 whenever you change a source file.
+
+Working with frontend assets
+----------------------------
+
+To update the frontend styles of shops with a custom styling, run the following commands inside
+your virtual environment.::
+
+    python -m pretix collectstatic --noinput
+    python -m pretix updateassets
+
 
 .. _Django's documentation: https://docs.djangoproject.com/en/1.11/ref/django-admin/#runserver
 .. _pretixdroid: https://github.com/pretix/pretixdroid

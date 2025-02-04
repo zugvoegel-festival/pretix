@@ -36,10 +36,12 @@ from collections import OrderedDict
 
 from django import forms
 from django.utils.translation import gettext_lazy as _
-from i18nfield.forms import I18nFormField, I18nTextarea, I18nTextInput
+from i18nfield.forms import I18nFormField, I18nTextInput
 
 from pretix import settings
-from pretix.base.forms import SecretKeySettingsField, SettingsForm
+from pretix.base.forms import (
+    I18nMarkdownTextarea, SecretKeySettingsField, SettingsForm,
+)
 from pretix.base.settings import GlobalSettingsObject
 from pretix.base.signals import register_global_settings
 
@@ -67,12 +69,12 @@ class GlobalSettingsForm(SettingsForm):
                 help_text=_("Will be included as the link in the additional footer text.")
             )),
             ('banner_message', I18nFormField(
-                widget=I18nTextarea,
+                widget=I18nMarkdownTextarea,
                 required=False,
                 label=_("Global message banner"),
             )),
             ('banner_message_detail', I18nFormField(
-                widget=I18nTextarea,
+                widget=I18nMarkdownTextarea,
                 required=False,
                 label=_("Global message banner detail text"),
             )),
@@ -126,7 +128,7 @@ class UpdateSettingsForm(SettingsForm):
     )
     update_check_email = forms.EmailField(
         required=False,
-        label=_("E-mail notifications"),
+        label=_("Email notifications"),
         help_text=_("We will notify you at this address if we detect that a new update is available. This "
                     "address will not be transmitted to pretix.eu, the emails will be sent by this server "
                     "locally.")

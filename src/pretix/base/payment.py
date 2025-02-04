@@ -56,8 +56,7 @@ from django.utils.translation import gettext_lazy as _, pgettext_lazy
 from i18nfield.forms import I18nFormField, I18nTextarea, I18nTextInput
 from i18nfield.strings import LazyI18nString
 
-from pretix.base.channels import get_all_sales_channels
-from pretix.base.forms import PlaceholderValidator
+from pretix.base.forms import I18nMarkdownTextarea, PlaceholderValidator
 from pretix.base.models import (
     CartPosition, Event, GiftCard, InvoiceAddress, Order, OrderPayment,
     OrderRefund, Quota, TaxRule,
@@ -67,6 +66,7 @@ from pretix.base.settings import SettingsSandbox
 from pretix.base.signals import register_payment_providers
 from pretix.base.templatetags.money import money_filter
 from pretix.base.templatetags.rich_text import rich_text
+from pretix.base.timemachine import time_machine_now
 from pretix.helpers import OF_SELF
 from pretix.helpers.countries import CachedCountries
 from pretix.helpers.format import format_map
@@ -416,8 +416,8 @@ class BasePaymentProvider:
              forms.MultipleChoiceField(
                  label=_('Restrict to specific sales channels'),
                  choices=(
-                     (c.identifier, c.verbose_name) for c in get_all_sales_channels().values()
-                     if c.payment_restrictions_supported
+                     (c.identifier, c.label) for c in self.event.organizer.sales_channels.all()
+                     if c.type_instance.payment_restrictions_supported
                  ),
                  initial=['web'],
                  widget=forms.CheckboxSelectMultiple,
@@ -587,7 +587,7 @@ class BasePaymentProvider:
             return rel_date.datetime(self.event).date()
 
     def _is_available_by_time(self, now_dt=None, cart_id=None, order=None):
-        now_dt = now_dt or now()
+        now_dt = now_dt or time_machine_now()
         tz = ZoneInfo(self.event.settings.timezone)
 
         try:
@@ -849,10 +849,10 @@ class BasePaymentProvider:
             except InvoiceAddress.DoesNotExist:
                 pass
             else:
-                if str(ia.country) not in restricted_countries:
+                if str(ia.country) != '' and str(ia.country) not in restricted_countries:
                     return False
 
-        if order.sales_channel not in self.settings.get('_restrict_to_sales_channels', as_type=list, default=['web']):
+        if order.sales_channel.identifier not in self.settings.get('_restrict_to_sales_channels', as_type=list, default=['web']):
             return False
 
         return self._is_available_by_time(order=order)
@@ -957,12 +957,19 @@ class BasePaymentProvider:
 
     def cancel_payment(self, payment: OrderPayment):
         """
-        Will be called to cancel a payment. The default implementation just sets the payment state to canceled,
-        but in some cases you might want to notify an external provider.
+        Will be called to cancel a payment. The default implementation fails if the payment is
+        ``OrderPayment.PAYMENT_STATE_PENDING`` and ``abort_pending_allowed`` is false. Otherwise, it just sets the
+        payment state to canceled. In some cases you might want to modify this behaviour to notify the external provider
+        of the cancellation.
 
         On success, you should set ``payment.state = OrderPayment.PAYMENT_STATE_CANCELED`` (or call the super method).
         On failure, you should raise a PaymentException.
         """
+        if payment.state == OrderPayment.PAYMENT_STATE_PENDING and not self.abort_pending_allowed:
+            raise PaymentException(_(
+                "This payment is already being processed and can not be canceled any more."
+            ))
+
         payment.state = OrderPayment.PAYMENT_STATE_CANCELED
         payment.save(update_fields=['state'])
 
@@ -1185,14 +1192,14 @@ class ManualPayment(BasePaymentProvider):
                     label=_('Payment process description during checkout'),
                     help_text=_('This text will be shown during checkout when the user selects this payment method. '
                                 'It should give a short explanation on this payment method.'),
-                    widget=I18nTextarea,
+                    widget=I18nMarkdownTextarea,
                 )),
                 ('email_instructions', I18nFormField(
                     label=_('Payment process description in order confirmation emails'),
                     help_text=_('This text will be included for the {payment_info} placeholder in order confirmation '
                                 'mails. It should instruct the user on how to proceed with the payment. You can use '
                                 'the placeholders {order}, {amount}, {currency} and {amount_with_currency}.'),
-                    widget=I18nTextarea,
+                    widget=I18nMarkdownTextarea,
                     validators=[PlaceholderValidator(['{order}', '{amount}', '{currency}', '{amount_with_currency}'])],
                 )),
                 ('pending_description', I18nFormField(
@@ -1200,7 +1207,7 @@ class ManualPayment(BasePaymentProvider):
                     help_text=_('This text will be shown on the order confirmation page for pending orders. '
                                 'It should instruct the user on how to proceed with the payment. You can use '
                                 'the placeholders {order}, {amount}, {currency} and {amount_with_currency}.'),
-                    widget=I18nTextarea,
+                    widget=I18nMarkdownTextarea,
                     validators=[PlaceholderValidator(['{order}', '{amount}', '{currency}', '{amount_with_currency}'])],
                 )),
                 ('invoice_immediately',
@@ -1311,9 +1318,7 @@ class GiftCardPayment(BasePaymentProvider):
 
     @property
     def public_name(self) -> str:
-        return str(self.settings.get("public_name", as_type=LazyI18nString)) or _(
-            "Gift card"
-        )
+        return str(self.settings.get("public_name", as_type=LazyI18nString) or _("Gift card"))
 
     @property
     def settings_form_fields(self):
@@ -1327,7 +1332,7 @@ class GiftCardPayment(BasePaymentProvider):
             (
                 "public_description",
                 I18nFormField(
-                    label=_("Payment method description"), widget=I18nTextarea, required=False
+                    label=_("Payment method description"), widget=I18nMarkdownTextarea, required=False
                 ),
             ),
         ]
@@ -1421,50 +1426,51 @@ class GiftCardPayment(BasePaymentProvider):
     def payment_refund_supported(self, payment: OrderPayment) -> bool:
         return True
 
-    def checkout_prepare(self, request: HttpRequest, cart: Dict[str, Any]) -> Union[bool, str, None]:
-        from pretix.base.services.cart import add_payment_to_cart
+    def _add_giftcard_to_cart(self, cs, gc):
+        from pretix.base.services.cart import add_payment_to_cart_session
 
+        if gc.currency != self.event.currency:
+            raise ValidationError(_("This gift card does not support this currency."))
+        if gc.testmode and not self.event.testmode:
+            raise ValidationError(_("This gift card can only be used in test mode."))
+        if not gc.testmode and self.event.testmode:
+            raise ValidationError(_("Only test gift cards can be used in test mode."))
+        if gc.expires and gc.expires < time_machine_now():
+            raise ValidationError(_("This gift card is no longer valid."))
+        if gc.value <= Decimal("0.00"):
+            raise ValidationError(_("All credit on this gift card has been used."))
+
+        for p in cs.get('payments', []):
+            if p['provider'] == self.identifier and p['info_data']['gift_card'] == gc.pk:
+                raise ValidationError(_("This gift card is already used for your payment."))
+
+        add_payment_to_cart_session(
+            cs,
+            self,
+            max_value=gc.value,
+            info_data={
+                'gift_card': gc.pk,
+                'gift_card_secret': gc.secret,
+            }
+        )
+
+    def checkout_prepare(self, request: HttpRequest, cart: Dict[str, Any]) -> Union[bool, str, None]:
         for p in get_cart(request):
             if p.item.issue_giftcard:
                 messages.error(request, _("You cannot pay with gift cards when buying a gift card."))
                 return
 
-        cs = cart_session(request)
         try:
             gc = self.event.organizer.accepted_gift_cards.get(
                 secret=request.POST.get("giftcard").strip()
             )
-            if gc.currency != self.event.currency:
-                messages.error(request, _("This gift card does not support this currency."))
+            cs = cart_session(request)
+            try:
+                self._add_giftcard_to_cart(cs, gc)
+                return True
+            except ValidationError as e:
+                messages.error(request, str(e.message))
                 return
-            if gc.testmode and not self.event.testmode:
-                messages.error(request, _("This gift card can only be used in test mode."))
-                return
-            if not gc.testmode and self.event.testmode:
-                messages.error(request, _("Only test gift cards can be used in test mode."))
-                return
-            if gc.expires and gc.expires < now():
-                messages.error(request, _("This gift card is no longer valid."))
-                return
-            if gc.value <= Decimal("0.00"):
-                messages.error(request, _("All credit on this gift card has been used."))
-                return
-
-            for p in cs.get('payments', []):
-                if p['provider'] == self.identifier and p['info_data']['gift_card'] == gc.pk:
-                    messages.error(request, _("This gift card is already used for your payment."))
-                    return
-
-            add_payment_to_cart(
-                request,
-                self,
-                max_value=gc.value,
-                info_data={
-                    'gift_card': gc.pk,
-                    'gift_card_secret': gc.secret,
-                }
-            )
-            return True
         except GiftCard.DoesNotExist:
             if self.event.vouchers.filter(code__iexact=request.POST.get("giftcard")).exists():
                 messages.warning(request, _("You entered a voucher instead of a gift card. Vouchers can only be entered on the first page of the shop below "
@@ -1493,7 +1499,7 @@ class GiftCardPayment(BasePaymentProvider):
             if not gc.testmode and payment.order.testmode:
                 messages.error(request, _("Only test gift cards can be used in test mode."))
                 return
-            if gc.expires and gc.expires < now():
+            if gc.expires and gc.expires < time_machine_now():
                 messages.error(request, _("This gift card is no longer valid."))
                 return
             if gc.value <= Decimal("0.00"):
@@ -1541,7 +1547,7 @@ class GiftCardPayment(BasePaymentProvider):
                     raise PaymentException(_("This gift card can only be used in test mode."))
                 if not gc.testmode and payment.order.testmode:
                     raise PaymentException(_("Only test gift cards can be used in test mode."))
-                if gc.expires and gc.expires < now():
+                if gc.expires and gc.expires < time_machine_now():
                     raise PaymentException(_("This gift card is no longer valid."))
 
                 trans = gc.transactions.create(

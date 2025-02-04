@@ -54,6 +54,8 @@ from pretix.base.models import (
     User, WaitingListEntry,
 )
 from pretix.base.models.items import SubEventItem, SubEventItemVariation
+from pretix.base.reldate import RelativeDate, RelativeDateWrapper
+from pretix.testutils.sessions import get_cart_session_key
 
 
 class EventTestMixin:
@@ -64,7 +66,7 @@ class EventTestMixin:
         self.event = Event.objects.create(
             organizer=self.orga, name='30C3', slug='30c3',
             date_from=datetime.datetime(now().year + 1, 12, 26, 14, 0, tzinfo=datetime.timezone.utc),
-            live=True, sales_channels=['web', 'bar']
+            live=True,
         )
         self.user = User.objects.create_user('dummy@dummy.dummy', 'dummy')
         t = Team.objects.create(organizer=self.orga, can_change_event_settings=True)
@@ -152,11 +154,15 @@ class ItemDisplayTest(EventTestMixin, SoupTest):
         with scopes_disabled():
             q = Quota.objects.create(event=self.event, name='Quota', size=2)
             item = Item.objects.create(event=self.event, name='Early-bird ticket', default_price=0, active=True,
-                                       sales_channels=['bar'])
+                                       all_sales_channels=False)
+            item.limit_sales_channels.add(self.orga.sales_channels.get(identifier="bar"))
             q.items.add(item)
         html = self.client.get('/%s/%s/' % (self.orga.slug, self.event.slug)).rendered_content
         self.assertNotIn("Early-bird", html)
-        html = self.client.get('/%s/%s/' % (self.orga.slug, self.event.slug), PRETIX_SALES_CHANNEL=FoobarSalesChannel).rendered_content
+        html = self.client.get(
+            '/%s/%s/' % (self.orga.slug, self.event.slug),
+            PRETIX_SALES_CHANNEL=FoobarSalesChannel.identifier
+        ).rendered_content
         self.assertIn("Early-bird", html)
 
     def test_timely_available(self):
@@ -400,11 +406,11 @@ class ItemDisplayTest(EventTestMixin, SoupTest):
             SubEventItem.objects.create(subevent=se1, item=item, price=12)
 
         resp = self.client.get('/%s/%s/%d/' % (self.orga.slug, self.event.slug, se1.pk))
-        self.assertIn("12.00", resp.rendered_content)
-        self.assertNotIn("15.00", resp.rendered_content)
+        self.assertIn("€12.00", resp.rendered_content)
+        self.assertNotIn("€15.00", resp.rendered_content)
         resp = self.client.get('/%s/%s/%d/' % (self.orga.slug, self.event.slug, se2.pk))
-        self.assertIn("15.00", resp.rendered_content)
-        self.assertNotIn("12.00", resp.rendered_content)
+        self.assertIn("€15.00", resp.rendered_content)
+        self.assertNotIn("€12.00", resp.rendered_content)
 
     def test_subevent_net_prices(self):
         self.event.has_subevents = True
@@ -424,14 +430,14 @@ class ItemDisplayTest(EventTestMixin, SoupTest):
 
         resp = self.client.get('/%s/%s/%d/' % (self.orga.slug, self.event.slug, se1.pk))
         doc = BeautifulSoup(resp.rendered_content, "lxml")
-        self.assertIn("10.08", doc.text)
-        self.assertNotIn("12.00", doc.text)
-        self.assertNotIn("15.00", doc.text)
+        self.assertIn("€10.08", doc.text)
+        self.assertNotIn("€12.00", doc.text)
+        self.assertNotIn("€15.00", doc.text)
         resp = self.client.get('/%s/%s/%d/' % (self.orga.slug, self.event.slug, se2.pk))
         doc = BeautifulSoup(resp.rendered_content, "lxml")
-        self.assertIn("12.61", doc.text)
-        self.assertNotIn("12.00", doc.text)
-        self.assertNotIn("15.00", doc.text)
+        self.assertIn("€12.61", doc.text)
+        self.assertNotIn("€12.00", doc.text)
+        self.assertNotIn("€15.00", doc.text)
 
     def test_variations_subevent_disabled(self):
         self.event.has_subevents = True
@@ -549,7 +555,8 @@ class ItemDisplayTest(EventTestMixin, SoupTest):
             q = Quota.objects.create(event=self.event, name='Quota', size=None)
             item = Item.objects.create(event=self.event, name='Early-bird ticket', category=c, default_price=0)
             var1 = ItemVariation.objects.create(item=item, value='Red')
-            var2 = ItemVariation.objects.create(item=item, value='Blue', sales_channels=['foobar'])
+            var2 = ItemVariation.objects.create(item=item, value='Blue', all_sales_channels=False)
+            var2.limit_sales_channels.add(self.orga.sales_channels.get(identifier='bar'))
         q.items.add(item)
         q.variations.add(var1)
         q.variations.add(var2)
@@ -997,6 +1004,25 @@ class VoucherRedeemItemDisplayTest(EventTestMixin, SoupTest):
         assert 'name="variation_%d_%d' % (self.item.pk, var1.pk) not in html.rendered_content
         assert 'name="variation_%d_%d' % (self.item.pk, var2.pk) not in html.rendered_content
 
+    def test_voucher_is_a_gift_card(self):
+        gc = self.orga.issued_gift_cards.create(secret="GIFTCARD", currency=self.event.currency)
+        gc.transactions.create(value=Decimal("12.00"), acceptor=self.orga)
+
+        html = self.client.get('/%s/%s/redeem?voucher=%s' % (self.orga.slug, self.event.slug, 'GIFTCARD'), follow=True)
+        assert "alert-success" in html.rendered_content
+        assert "€12.00" in html.rendered_content
+
+        payments = self.client.session['carts'][get_cart_session_key(self.client, self.event)]["payments"]
+        assert payments[0]["info_data"]["gift_card_secret"] == "GIFTCARD"
+
+    def test_voucher_is_a_gift_card_but_invalid(self):
+        gc = self.orga.issued_gift_cards.create(secret="GIFTCARD", currency=self.event.currency, expires=now() - datetime.timedelta(days=1))
+        gc.transactions.create(value=Decimal("12.00"), acceptor=self.orga)
+
+        html = self.client.get('/%s/%s/redeem?voucher=%s' % (self.orga.slug, self.event.slug, 'GIFTCARD'), follow=True)
+        assert "alert-danger" in html.rendered_content
+        assert "This gift card is no longer valid" in html.rendered_content
+
 
 class WaitingListTest(EventTestMixin, SoupTest):
     @scopes_disabled()
@@ -1011,6 +1037,21 @@ class WaitingListTest(EventTestMixin, SoupTest):
 
     def test_disabled(self):
         self.event.settings.set('waiting_list_enabled', False)
+        response = self.client.get(
+            '/%s/%s/' % (self.orga.slug, self.event.slug)
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn('waitinglist', response.rendered_content)
+        response = self.client.get(
+            '/%s/%s/waitinglist/?item=%d' % (self.orga.slug, self.event.slug, self.item.pk + 1)
+        )
+        self.assertEqual(response.status_code, 302)
+
+    def test_auto_disable(self):
+        self.event.settings.set('waiting_list_enabled', True)
+        self.event.settings.waiting_list_auto_disable = RelativeDateWrapper(
+            RelativeDate(days=900, time=datetime.time(9, 0, 0), base_date_name='date_from', minutes=None, is_after=False)
+        )
         response = self.client.get(
             '/%s/%s/' % (self.orga.slug, self.event.slug)
         )
@@ -1262,7 +1303,7 @@ class DeadlineTest(EventTestMixin, TestCase):
     def test_saleschannel_disabled(self):
         self.event.presale_start = None
         self.event.presale_end = None
-        self.event.sales_channels = []
+        self.event.all_sales_channels = False
         self.event.save()
         response = self.client.get(
             '/%s/%s/' % (self.orga.slug, self.event.slug)
@@ -1309,6 +1350,7 @@ class TestResendLink(EventTestMixin, SoupTest):
             Order.objects.create(
                 code='DUMMY1', status=Order.STATUS_PENDING, event=self.event,
                 email='dummy@dummy.dummy', datetime=now(), expires=now(),
+                sales_channel=self.orga.sales_channels.get(identifier="web"),
                 total=0,
             )
         mail.outbox = []
@@ -1323,6 +1365,7 @@ class TestResendLink(EventTestMixin, SoupTest):
             Order.objects.create(
                 code='DUMMY1', status=Order.STATUS_PENDING, event=self.event,
                 email='dummy@dummy.dummy', datetime=now(), expires=now(),
+                sales_channel=self.orga.sales_channels.get(identifier="web"),
                 total=0,
             )
         mail.outbox = []
@@ -1338,11 +1381,13 @@ class TestResendLink(EventTestMixin, SoupTest):
             Order.objects.create(
                 code='DUMMY1', status=Order.STATUS_PENDING, event=self.event,
                 email='dummy@dummy.dummy', datetime=now(), expires=now(),
+                sales_channel=self.orga.sales_channels.get(identifier="web"),
                 total=0,
             )
             Order.objects.create(
                 code='DUMMY2', status=Order.STATUS_PENDING, event=self.event,
                 email='dummy@dummy.dummy', datetime=now(), expires=now(),
+                sales_channel=self.orga.sales_channels.get(identifier="web"),
                 total=0,
             )
         mail.outbox = []
@@ -1559,6 +1604,8 @@ class EventLocaleTest(EventTestMixin, SoupTest):
         self.event.settings.locales = ['de', 'en']
         self.event.settings.locale = 'de'
         self.event.settings.timezone = 'UTC'
+        self.event.date_from = datetime.datetime(2024, 12, 26, 14, 0, tzinfo=datetime.timezone.utc)
+        self.event.save()
 
     def test_german_by_default(self):
         response = self.client.get(
@@ -1574,7 +1621,7 @@ class EventLocaleTest(EventTestMixin, SoupTest):
             '/%s/%s/' % (self.orga.slug, self.event.slug)
         )
         self.assertEqual(response.status_code, 200)
-        self.assertIn('Dec. 26,', response.rendered_content)
+        self.assertIn('Thu, Dec. 26th,', response.rendered_content)
         self.assertIn('14:00', response.rendered_content)
 
     def test_english_region_US(self):
@@ -1584,7 +1631,7 @@ class EventLocaleTest(EventTestMixin, SoupTest):
             '/%s/%s/' % (self.orga.slug, self.event.slug)
         )
         self.assertEqual(response.status_code, 200)
-        self.assertIn('Dec. 26,', response.rendered_content)
+        self.assertIn('Thu, Dec. 26th,', response.rendered_content)
         self.assertIn('2 p.m.', response.rendered_content)
 
     def test_german_region_US(self):
@@ -1594,5 +1641,5 @@ class EventLocaleTest(EventTestMixin, SoupTest):
             '/%s/%s/' % (self.orga.slug, self.event.slug)
         )
         self.assertEqual(response.status_code, 200)
-        self.assertIn('26. Dezember', response.rendered_content)
+        self.assertIn('Do, 26. Dezember', response.rendered_content)
         self.assertIn('14:00', response.rendered_content)

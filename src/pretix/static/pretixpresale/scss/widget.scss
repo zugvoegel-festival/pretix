@@ -1,4 +1,5 @@
-@import "../../pretixbase/scss/_variables.scss";
+// not included, will be dynamically prepended @import "../../pretixbase/scss/_theme_variables.scss";
+@import "../../pretixbase/scss/_bootstrap_vars.scss";
 @import "../../bootstrap/scss/bootstrap/variables";
 @import "../../bootstrap/scss/bootstrap/mixins";
 
@@ -47,7 +48,7 @@
     text-decoration: none;
     @include button-size($padding-base-vertical, $padding-base-horizontal, $font-size-base, $line-height-base, $btn-border-radius-base);
     @include user-select(none);
-    @include button-variant($btn-primary-color, $btn-primary-bg, $btn-primary-border);
+    @include button-variant($btn-primary-color, $btn-primary-bg, $btn-primary-border, $btn-primary-background-active, $btn-primary-border-active, $btn-primary-border-hover);
 
     &,
     &:active,
@@ -66,11 +67,11 @@
       @include box-shadow(none);
     }
     &.pretix-widget-btn-default {
-      @include button-variant($btn-default-color, $btn-default-bg, $btn-default-border);
+      @include button-variant($btn-default-color, $btn-default-bg, $btn-default-border, darken($btn-default-bg, 10%), darken($btn-default-border, 25%), darken($btn-default-border, 12%));
     }
   }
   label.pretix-widget-btn-checkbox {
-    @include button-variant($btn-default-color, $btn-default-bg, $btn-default-border);
+    @include button-variant($btn-default-color, $btn-default-bg, $btn-default-border, darken($btn-default-bg, 10%), darken($btn-default-border, 25%), darken($btn-default-border, 12%));
     border-width: 1px;
     border-style: solid;
     position: relative;
@@ -429,6 +430,19 @@
 
   .pretix-widget-item-availability-col {
     text-align: center;
+
+    .pretix-widget-collapse-indicator::before {
+      content: "";
+      display: inline-block;
+      width: $font-size-base;
+      height: $font-size-base;
+      background: url("data:image/svg+xml,%3Csvg viewBox='0 0 14 14' xmlns='http://www.w3.org/2000/svg' xml:space='preserve'%3E%3Cpath fill='#{url-friendly-colour($link-color)}' d='M6.395 4.151a.268.268 0 0 0-.177.077l-.386.386a.259.259 0 0 0-.077.177c.002.067.029.13.077.179l3.033 3.031-3.033 3.032a.255.255 0 0 0-.077.177.253.253 0 0 0 .077.178l.386.385a.268.268 0 0 0 .177.077.27.27 0 0 0 .178-.077l3.595-3.595a.259.259 0 0 0 .077-.177.255.255 0 0 0-.077-.176L6.573 4.228a.257.257 0 0 0-.178-.077Z'/%3E%3C/svg%3E");
+      transition: transform .5s;
+    }
+
+    .pretix-widget-collapse-indicator[aria-expanded=true]::before {
+      transform: rotate(90deg);
+    }
   }
 
   .pretix-widget-availability-gone {
@@ -954,8 +968,14 @@
     float: none;
     margin-bottom: 5px;
   }
+  .pretix-widget-item-info-col:after {
+    display: block;
+    content: "";
+    clear: both;
+  }
   .pretix-widget-item-price-col, .pretix-widget-item-availability-col {
     width: 50%;
+    min-width: 140px;
   }
   .pretix-widget-action {
     width: 100%;

@@ -32,7 +32,6 @@
 # distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 # License for the specific language governing permissions and limitations under the License.
 
-import hashlib
 import json
 import logging
 import urllib.parse
@@ -486,15 +485,11 @@ def oauth_disconnect(request, **kwargs):
 class StripeOrderView:
     def dispatch(self, request, *args, **kwargs):
         try:
-            self.order = request.event.orders.get(code=kwargs['order'])
-            if hashlib.sha1(self.order.secret.lower().encode()).hexdigest() != kwargs['hash'].lower():
-                raise Http404('')
+            self.order = request.event.orders.get_with_secret_check(
+                code=kwargs['order'], received_secret=kwargs['hash'].lower(), tag='plugins:stripe'
+            )
         except Order.DoesNotExist:
-            # Do a hash comparison as well to harden timing attacks
-            if 'abcdefghijklmnopq'.lower() == hashlib.sha1('abcdefghijklmnopq'.encode()).hexdigest():
-                raise Http404('')
-            else:
-                raise Http404('')
+            raise Http404('Unknown order')
         self.payment = get_object_or_404(
             self.order.payments,
             pk=self.kwargs['payment'],
@@ -599,7 +594,8 @@ class ScaView(StripeOrderView, View):
             return self._redirect_to_order()
 
         if intent.status == 'requires_action' and intent.next_action.type in [
-            'use_stripe_sdk', 'redirect_to_url', 'alipay_handle_redirect', 'wechat_pay_display_qr_code'
+            'use_stripe_sdk', 'redirect_to_url', 'alipay_handle_redirect', 'wechat_pay_display_qr_code',
+            'swish_handle_redirect_or_display_qr_code', 'multibanco_display_details',
         ]:
             ctx = {
                 'order': self.order,
@@ -611,6 +607,12 @@ class ScaView(StripeOrderView, View):
             elif intent.next_action.type == 'redirect_to_url':
                 ctx['payment_intent_next_action_redirect_url'] = intent.next_action.redirect_to_url['url']
                 ctx['payment_intent_redirect_action_handling'] = prov.redirect_action_handling
+            elif intent.next_action.type == 'swish_handle_redirect_or_display_qr_code':
+                ctx['payment_intent_next_action_redirect_url'] = intent.next_action.swish_handle_redirect_or_display_qr_code['hosted_instructions_url']
+                ctx['payment_intent_redirect_action_handling'] = 'iframe'
+            elif intent.next_action.type == 'multibanco_display_details':
+                ctx['payment_intent_next_action_redirect_url'] = intent.next_action.multibanco_display_details['hosted_voucher_url']
+                ctx['payment_intent_redirect_action_handling'] = 'iframe'
 
             r = render(request, 'pretixplugins/stripe/sca.html', ctx)
             r._csp_ignore = True

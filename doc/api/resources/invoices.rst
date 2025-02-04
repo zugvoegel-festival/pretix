@@ -97,6 +97,7 @@ lines                                 list of objects            The actual invo
 ├ gross_value                         money (string)             Price including taxes
 ├ tax_value                           money (string)             Tax amount included
 ├ tax_name                            string                     Name of used tax rate (e.g. "VAT")
+├ tax_code                            string                     Codified reason for tax rate (or ``null``), see :ref:`rest-taxcodes`.
 └ tax_rate                            decimal (string)           Used tax rate
 foreign_currency_display              string                     If the invoice should also show the total and tax
                                                                  amount in a different currency, this contains the
@@ -125,6 +126,10 @@ internal_reference                    string                     Customer's refe
 .. versionchanged:: 2023.8
 
    The ``event`` attribute has been added. The organizer-level endpoint has been added.
+
+.. versionchanged:: 2024.8
+
+   The ``tax_code`` attribute has been added.
 
 
 List of all invoices
@@ -203,6 +208,7 @@ List of all invoices
                 "gross_value": "23.00",
                 "tax_value": "0.00",
                 "tax_name": "VAT",
+                "tax_code": "S/standard",
                 "tax_rate": "0.00"
               }
             ],
@@ -217,6 +223,9 @@ List of all invoices
    :query boolean is_cancellation: If set to ``true`` or ``false``, only invoices with this value for the field
                                    ``is_cancellation`` will be returned.
    :query string order: If set, only invoices belonging to the order with the given order code will be returned.
+                        This parameter may be given multiple times. In this case, all invoices matching one of the inputs will be returned.
+   :query string number: If set, only invoices with the given invoice number will be returned.
+                        This parameter may be given multiple times. In this case, all invoices matching one of the inputs will be returned.
    :query string refers: If set, only invoices referring to the given invoice will be returned.
    :query string locale: If set, only invoices with the given locale will be returned.
    :query string ordering: Manually set the ordering of results. Valid fields to be used are ``date`` and
@@ -339,6 +348,7 @@ Fetching individual invoices
             "gross_value": "23.00",
             "tax_value": "0.00",
             "tax_name": "VAT",
+            "tax_code": "S/standard",
             "tax_rate": "0.00"
           }
         ],
@@ -349,12 +359,12 @@ Fetching individual invoices
 
    :param organizer: The ``slug`` field of the organizer to fetch
    :param event: The ``slug`` field of the event to fetch
-   :param invoice_no: The ``invoice_no`` field of the invoice to fetch
+   :param number: The ``number`` field of the invoice to fetch
    :statuscode 200: no error
    :statuscode 401: Authentication failure
    :statuscode 403: The requested organizer/event does not exist **or** you have no permission to view this resource.
 
-.. http:get:: /api/v1/organizers/(organizer)/events/(event)/invoices/(invoice_no)/download/
+.. http:get:: /api/v1/organizers/(organizer)/events/(event)/invoices/(number)/download/
 
    Download an invoice in PDF format.
 
@@ -381,7 +391,7 @@ Fetching individual invoices
 
    :param organizer: The ``slug`` field of the organizer to fetch
    :param event: The ``slug`` field of the event to fetch
-   :param invoice_no: The ``invoice_no`` field of the invoice to fetch
+   :param number: The ``number`` field of the invoice to fetch
    :statuscode 200: no error
    :statuscode 401: Authentication failure
    :statuscode 403: The requested organizer/event does not exist **or** you have no permission to view this resource.
@@ -394,7 +404,7 @@ Modifying invoices
 
 Invoices cannot be edited directly, but the following actions can be triggered:
 
-.. http:post:: /api/v1/organizers/(organizer)/events/(event)/invoices/(invoice_no)/reissue/
+.. http:post:: /api/v1/organizers/(organizer)/events/(event)/invoices/(number)/reissue/
 
    Cancels the invoice and creates a new one.
 
@@ -416,13 +426,13 @@ Invoices cannot be edited directly, but the following actions can be triggered:
 
    :param organizer: The ``slug`` field of the organizer to fetch
    :param event: The ``slug`` field of the event to fetch
-   :param invoice_no: The ``invoice_no`` field of the invoice to reissue
+   :param number: The ``number`` field of the invoice to reissue
    :statuscode 200: no error
    :statuscode 400: The invoice has already been canceled
    :statuscode 401: Authentication failure
    :statuscode 403: The requested organizer/event does not exist **or** you have no permission to change this resource.
 
-.. http:post:: /api/v1/organizers/(organizer)/events/(event)/invoices/(invoice_no)/regenerate/
+.. http:post:: /api/v1/organizers/(organizer)/events/(event)/invoices/(number)/regenerate/
 
    Re-generates the invoice from order data.
 
@@ -444,7 +454,7 @@ Invoices cannot be edited directly, but the following actions can be triggered:
 
    :param organizer: The ``slug`` field of the organizer to fetch
    :param event: The ``slug`` field of the event to fetch
-   :param invoice_no: The ``invoice_no`` field of the invoice to regenerate
+   :param number: The ``number`` field of the invoice to regenerate
    :statuscode 200: no error
    :statuscode 400: The invoice has already been canceled
    :statuscode 401: Authentication failure

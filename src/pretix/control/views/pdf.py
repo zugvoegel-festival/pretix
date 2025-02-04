@@ -98,6 +98,7 @@ class BaseEditorView(EventPermissionRequiredMixin, TemplateView):
         from pretix.base.models import Order
         order = self.request.event.orders.create(status=Order.STATUS_PENDING, datetime=now(),
                                                  email='sample@pretix.eu',
+                                                 sales_channel=self.request.event.organizer.sales_channels.get(identifier="web"),
                                                  locale=self.request.event.settings.locale,
                                                  expires=now(), code="PREVIEW1234", total=Decimal('119.00'))
 
@@ -262,7 +263,7 @@ class BaseEditorView(EventPermissionRequiredMixin, TemplateView):
 
     def get_context_data(self, **kwargs):
         ctx = super().get_context_data(**kwargs)
-        ctx['fonts'] = get_fonts()
+        ctx['fonts'] = get_fonts(self.request.event, pdf_support_required=True)
         ctx['pdf'] = self.get_current_background()
         ctx['variables'] = self.get_variables()
         ctx['images'] = self.get_images()
@@ -278,7 +279,7 @@ class FontsCSSView(TemplateView):
 
     def get_context_data(self, **kwargs):
         ctx = super().get_context_data(**kwargs)
-        ctx['fonts'] = get_fonts()
+        ctx['fonts'] = get_fonts(self.request.event if hasattr(self.request, 'event') else None, pdf_support_required=True)
         return ctx
 
 

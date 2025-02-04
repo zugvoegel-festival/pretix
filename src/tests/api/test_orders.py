@@ -50,7 +50,7 @@ def item2(event2):
 
 @pytest.fixture
 def taxrule(event):
-    return event.tax_rules.create(rate=Decimal('19.00'))
+    return event.tax_rules.create(rate=Decimal('19.00'), code="S/standard")
 
 
 @pytest.fixture
@@ -76,7 +76,7 @@ def quota(event, item):
 
 
 @pytest.fixture
-def order(event, item, taxrule, question):
+def order(event, item, device, taxrule, question):
     testtime = datetime.datetime(2017, 12, 1, 10, 0, 0, tzinfo=datetime.timezone.utc)
     event.plugins += ",pretix.plugins.stripe"
     event.save()
@@ -88,6 +88,7 @@ def order(event, item, taxrule, question):
             status=Order.STATUS_PENDING, secret="k24fiuwvu8kxz3y1",
             datetime=datetime.datetime(2017, 12, 1, 10, 0, 0, tzinfo=datetime.timezone.utc),
             expires=datetime.datetime(2017, 12, 10, 10, 0, 0, tzinfo=datetime.timezone.utc),
+            sales_channel=event.organizer.sales_channels.get(identifier="web"),
             total=23, locale='en'
         )
         p1 = o.payments.create(
@@ -110,9 +111,9 @@ def order(event, item, taxrule, question):
             amount=Decimal('23.00'),
         )
         o.fees.create(fee_type=OrderFee.FEE_TYPE_PAYMENT, value=Decimal('0.25'), tax_rate=Decimal('19.00'),
-                      tax_value=Decimal('0.05'), tax_rule=taxrule)
+                      tax_value=Decimal('0.05'), tax_rule=taxrule, tax_code=taxrule.code)
         o.fees.create(fee_type=OrderFee.FEE_TYPE_PAYMENT, value=Decimal('0.25'), tax_rate=Decimal('19.00'),
-                      tax_value=Decimal('0.05'), tax_rule=taxrule, canceled=True)
+                      tax_value=Decimal('0.05'), tax_rule=taxrule, tax_code=taxrule.code, canceled=True)
         InvoiceAddress.objects.create(order=o, company="Sample company", country=Country('NZ'),
                                       vat_id="DE123", vat_id_validated=True, custom_field="Custom info")
         op = OrderPosition.objects.create(
@@ -136,6 +137,13 @@ def order(event, item, taxrule, question):
             canceled=True,
             positionid=2,
         )
+        op.print_logs.create(
+            device=device,
+            type="badge",
+            source="pretixpos",
+            info={"cashier": 1234},
+            datetime=datetime.datetime(2017, 12, 1, 12, 0, 0, tzinfo=datetime.timezone.utc),
+        )
         op.answers.create(question=question, answer='S')
         return o
 
@@ -151,6 +159,7 @@ def order2(event2, item2):
             status=Order.STATUS_PENDING, secret="asd436cvbfd1",
             datetime=datetime.datetime(2017, 12, 1, 10, 0, 0, tzinfo=datetime.timezone.utc),
             expires=datetime.datetime(2017, 12, 10, 10, 0, 0, tzinfo=datetime.timezone.utc),
+            sales_channel=event2.organizer.sales_channels.get(identifier="web"),
             total=23, locale='en'
         )
         o.payments.create(
@@ -171,12 +180,6 @@ def order2(event2, item2):
         return o
 
 
-@pytest.fixture
-def clist_autocheckin(event):
-    c = event.checkin_lists.create(name="Default", all_products=True, auto_checkin_sales_channels=['web'])
-    return c
-
-
 TEST_ORDERPOSITION_RES = {
     "id": 1,
     "order": "FOO",
@@ -188,14 +191,29 @@ TEST_ORDERPOSITION_RES = {
     "attendee_name": "Peter",
     "attendee_email": None,
     "voucher": None,
+    "voucher_budget_use": None,
     "discount": None,
     "tax_rate": "0.00",
     "tax_value": "0.00",
     "tax_rule": None,
+    "tax_code": None,
     "secret": "z3fsn8jyufm5kpk768q69gkbyr5f4h6w",
     "addon_to": None,
     "pseudonymization_id": "ABCDEFGHKL",
     "checkins": [],
+    "print_logs": [
+        {
+            "id": -1,
+            "device_id": -1,
+            "successful": True,
+            "datetime": "2017-12-01T12:00:00Z",
+            "source": "pretixpos",
+            "type": "badge",
+            "info": {
+                "cashier": 1234
+            },
+        }
+    ],
     "downloads": [],
     "seat": None,
     "company": None,
@@ -280,6 +298,7 @@ TEST_ORDER_RES = {
             "description": "",
             "internal_type": "",
             "tax_rate": "19.00",
+            "tax_code": "S/standard",
             "tax_value": "0.05"
         }
     ],
@@ -287,6 +306,7 @@ TEST_ORDER_RES = {
     "payment_provider": "banktransfer",
     "total": "23.00",
     "comment": "",
+    "api_meta": {},
     "custom_followup_at": None,
     "checkin_attention": False,
     "checkin_text": None,
@@ -312,11 +332,12 @@ TEST_ORDER_RES = {
     "downloads": [],
     "payments": TEST_PAYMENTS_RES,
     "refunds": TEST_REFUNDS_RES,
+    "cancellation_date": None,
 }
 
 
 @pytest.mark.django_db
-def test_order_list_filter_subevent_date(token_client, organizer, event, order, item, taxrule, subevent, question):
+def test_order_list_filter_subevent_date(token_client, device, organizer, event, order, item, taxrule, subevent, question):
     res = copy.deepcopy(TEST_ORDER_RES)
     with scopes_disabled():
         res["positions"][0]["id"] = order.positions.first().pk
@@ -324,6 +345,9 @@ def test_order_list_filter_subevent_date(token_client, organizer, event, order, 
         p.subevent = subevent
         p.save()
         fee = order.fees.first()
+        pl = p.print_logs.first()
+    res["positions"][0]["print_logs"][0]["id"] = pl.pk
+    res["positions"][0]["print_logs"][0]["device_id"] = device.device_id
     res["positions"][0]["item"] = item.pk
     res["positions"][0]["subevent"] = subevent.pk
     res["positions"][0]["answers"][0]["question"] = question.pk
@@ -374,11 +398,13 @@ def test_order_list_filter_subevent_date(token_client, organizer, event, order, 
 
 
 @pytest.mark.django_db
-def test_order_list(token_client, organizer, event, order, item, taxrule, question):
+def test_order_list(token_client, organizer, event, order, item, taxrule, question, device):
     res = dict(TEST_ORDER_RES)
     with scopes_disabled():
         res["positions"][0]["id"] = order.positions.first().pk
         res["fees"][0]["id"] = order.fees.first().pk
+        res["positions"][0]["print_logs"][0]["id"] = order.positions.first().print_logs.first().pk
+        res["positions"][0]["print_logs"][0]["device_id"] = device.device_id
     res["positions"][0]["item"] = item.pk
     res["positions"][0]["answers"][0]["question"] = question.pk
     res["last_modified"] = order.last_modified.isoformat().replace('+00:00', 'Z')
@@ -410,6 +436,16 @@ def test_order_list(token_client, organizer, event, order, item, taxrule, questi
         '/api/v1/organizers/{}/events/{}/orders/?email=foo@example.org'.format(organizer.slug, event.slug))
     assert [] == resp.data['results']
 
+    resp = token_client.get('/api/v1/organizers/{}/events/{}/orders/?payment_provider=banktransfer'.format(organizer.slug, event.slug))
+    assert [res] == resp.data['results']
+    resp = token_client.get('/api/v1/organizers/{}/events/{}/orders/?payment_provider=manual'.format(organizer.slug, event.slug))
+    assert [] == resp.data['results']
+
+    resp = token_client.get('/api/v1/organizers/{}/events/{}/orders/?sales_channel=web'.format(organizer.slug, event.slug))
+    assert [res] == resp.data['results']
+    resp = token_client.get('/api/v1/organizers/{}/events/{}/orders/?sales_channel=bar'.format(organizer.slug, event.slug))
+    assert [] == resp.data['results']
+
     resp = token_client.get('/api/v1/organizers/{}/events/{}/orders/?locale=en'.format(organizer.slug, event.slug))
     assert [res] == resp.data['results']
     resp = token_client.get('/api/v1/organizers/{}/events/{}/orders/?locale=de'.format(organizer.slug, event.slug))
@@ -429,6 +465,36 @@ def test_order_list(token_client, organizer, event, order, item, taxrule, questi
         (order.last_modified + datetime.timedelta(hours=1)).isoformat().replace('+00:00', 'Z')
     ))
     assert [] == resp.data['results']
+
+    resp = token_client.get('/api/v1/organizers/{}/events/{}/orders/?created_since={}'.format(
+        organizer.slug, event.slug,
+        (order.datetime - datetime.timedelta(hours=1)).isoformat().replace('+00:00', 'Z')
+    ))
+    assert [res] == resp.data['results']
+    resp = token_client.get('/api/v1/organizers/{}/events/{}/orders/?created_since={}'.format(
+        organizer.slug, event.slug, order.datetime.isoformat().replace('+00:00', 'Z')
+    ))
+    assert [res] == resp.data['results']
+    resp = token_client.get('/api/v1/organizers/{}/events/{}/orders/?created_since={}'.format(
+        organizer.slug, event.slug,
+        (order.datetime + datetime.timedelta(hours=1)).isoformat().replace('+00:00', 'Z')
+    ))
+    assert [] == resp.data['results']
+
+    resp = token_client.get('/api/v1/organizers/{}/events/{}/orders/?created_before={}'.format(
+        organizer.slug, event.slug,
+        (order.datetime - datetime.timedelta(hours=1)).isoformat().replace('+00:00', 'Z')
+    ))
+    assert [] == resp.data['results']
+    resp = token_client.get('/api/v1/organizers/{}/events/{}/orders/?created_before={}'.format(
+        organizer.slug, event.slug, order.datetime.isoformat().replace('+00:00', 'Z')
+    ))
+    assert [] == resp.data['results']
+    resp = token_client.get('/api/v1/organizers/{}/events/{}/orders/?created_before={}'.format(
+        organizer.slug, event.slug,
+        (order.datetime + datetime.timedelta(hours=1)).isoformat().replace('+00:00', 'Z')
+    ))
+    assert [res] == resp.data['results']
 
     resp = token_client.get('/api/v1/organizers/{}/events/{}/orders/?include_canceled_positions=false'.format(organizer.slug, event.slug))
     assert resp.status_code == 200
@@ -452,6 +518,7 @@ def test_order_detail(token_client, organizer, event, order, item, taxrule, ques
     res = dict(TEST_ORDER_RES)
     with scopes_disabled():
         res["positions"][0]["id"] = order.positions.first().pk
+        res["positions"][0]["print_logs"][0]["id"] = order.positions.first().print_logs.first().pk
         res["fees"][0]["id"] = order.fees.first().pk
     res["positions"][0]["item"] = item.pk
     res["fees"][0]["tax_rule"] = taxrule.pk
@@ -914,7 +981,7 @@ def test_refund_cancel(token_client, organizer, event, order):
 
 
 @pytest.mark.django_db
-def test_orderposition_list(token_client, organizer, event, order, item, subevent, subevent2, question):
+def test_orderposition_list(token_client, organizer, device, event, order, item, subevent, subevent2, question, django_assert_num_queries):
     i2 = copy.copy(item)
     i2.pk = None
     i2.save()
@@ -923,12 +990,14 @@ def test_orderposition_list(token_client, organizer, event, order, item, subeven
         var2 = item.variations.create(value="Children")
         res = copy.copy(TEST_ORDERPOSITION_RES)
         op = order.positions.first()
-    op.variation = var
-    op.save()
-    res["id"] = op.pk
-    res["item"] = item.pk
-    res["variation"] = var.pk
-    res["answers"][0]["question"] = question.pk
+        op.variation = var
+        op.save()
+        res["id"] = op.pk
+        res["item"] = item.pk
+        res["variation"] = var.pk
+        res["answers"][0]["question"] = question.pk
+        res["print_logs"][0]["id"] = op.print_logs.first().pk
+        res["print_logs"][0]["device_id"] = device.device_id
 
     resp = token_client.get('/api/v1/organizers/{}/events/{}/orderpositions/'.format(organizer.slug, event.slug))
     assert resp.status_code == 200
@@ -1015,19 +1084,22 @@ def test_orderposition_list(token_client, organizer, event, order, item, subeven
 
     with scopes_disabled():
         cl = event.checkin_lists.create(name="Default")
-        c = op.checkins.create(datetime=datetime.datetime(2017, 12, 26, 10, 0, 0, tzinfo=datetime.timezone.utc), list=cl)
+        c = op.checkins.create(datetime=datetime.datetime(2017, 12, 26, 10, 0, 0, tzinfo=datetime.timezone.utc), list=cl, device=device)
         op.checkins.create(datetime=datetime.datetime(2017, 12, 26, 10, 0, 0, tzinfo=datetime.timezone.utc), list=cl, successful=False)
     res['checkins'] = [{  # successful only
         'id': c.pk,
         'datetime': '2017-12-26T10:00:00Z',
         'list': cl.pk,
         'auto_checked_in': False,
-        'device': None,
+        'device': device.pk,
+        'device_id': device.device_id,
         'gate': None,
         'type': 'entry'
     }]
-    resp = token_client.get(
-        '/api/v1/organizers/{}/events/{}/orderpositions/?has_checkin=true'.format(organizer.slug, event.slug))
+    with django_assert_num_queries(16):
+        resp = token_client.get(
+            '/api/v1/organizers/{}/events/{}/orderpositions/?has_checkin=true'.format(organizer.slug, event.slug)
+        )
     assert [res] == resp.data['results']
 
     op.subevent = subevent
@@ -1059,6 +1131,7 @@ def test_orderposition_detail(token_client, organizer, event, order, item, quest
     res = dict(TEST_ORDERPOSITION_RES)
     with scopes_disabled():
         op = order.positions.first()
+        res["print_logs"][0]["id"] = op.print_logs.first().pk
     res["id"] = op.pk
     res["item"] = item.pk
     res["answers"][0]["question"] = question.pk
@@ -1121,6 +1194,30 @@ def test_orderposition_delete(token_client, organizer, event, order, item, quest
         assert order.all_positions.count() == 3
     order.refresh_from_db()
     assert order.total == Decimal('23.25')
+
+
+@pytest.mark.django_db
+def test_orderposition_printlog(token_client, team, organizer, event, order, item, question):
+    with scopes_disabled():
+        op = order.positions.first()
+    resp = token_client.post('/api/v1/organizers/{}/events/{}/orderpositions/{}/printlog/'.format(
+        organizer.slug, event.slug, op.pk
+    ), data={
+        "datetime": "2023-09-04T12:23:45+02:00",
+        "source": "pretixscan",
+        "type": "badge",
+        "info": {
+            "cashier": 1234,
+        }
+    }, format='json')
+    assert resp.status_code == 201
+
+    with scopes_disabled():
+        l = op.print_logs.get(source="pretixscan")
+        assert l.type == "badge"
+        assert l.info == {"cashier": 1234}
+        assert l.api_token.team == team
+        assert l.datetime.isoformat() == "2023-09-04T10:23:45+00:00"
 
 
 @pytest.mark.django_db
@@ -1872,7 +1969,7 @@ def test_pdf_data(token_client, organizer, event, order, django_assert_max_num_q
     assert not resp.data['positions'][0].get('pdf_data')
 
     # order list
-    with django_assert_max_num_queries(30):
+    with django_assert_max_num_queries(32):
         resp = token_client.get('/api/v1/organizers/{}/events/{}/orders/?pdf_data=true'.format(
             organizer.slug, event.slug
         ))
@@ -1887,7 +1984,7 @@ def test_pdf_data(token_client, organizer, event, order, django_assert_max_num_q
     assert not resp.data['results'][0]['positions'][0].get('pdf_data')
 
     # position list
-    with django_assert_max_num_queries(33):
+    with django_assert_max_num_queries(35):
         resp = token_client.get('/api/v1/organizers/{}/events/{}/orderpositions/?pdf_data=true'.format(
             organizer.slug, event.slug
         ))

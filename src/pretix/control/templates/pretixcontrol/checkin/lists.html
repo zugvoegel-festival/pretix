@@ -1,6 +1,7 @@
 {% extends "pretixcontrol/items/base.html" %}
 {% load i18n %}
 {% load bootstrap3 %}
+{% load static %}
 {% load urlreplace %}
 {% block title %}{% trans "Check-in lists" %}{% endblock %}
 {% block inside %}
@@ -100,7 +101,6 @@
                             <a href="?{% url_replace request 'ordering' 'subevent' %}"><i class="fa fa-caret-up"></i></a>
                         </th>
                     {% endif %}
-                    <th class="iconcol">{% trans "Automated check-in" %}</th>
                     <th>{% trans "Products" %}</th>
                     <th class="action-col-2"></th>
                 </tr>
@@ -136,12 +136,6 @@
                                 </td>
                             {% endif %}
                         {% endif %}
-                        <td>
-                            {% for channel in cl.auto_checkin_sales_channels %}
-                                <span class="fa fa-{{ channel.icon }} text-muted"
-                                      data-toggle="tooltip" title="{% trans channel.verbose_name %}"></span>
-                            {% endfor %}
-                        </td>
                         <td>
                             {% if cl.all_products %}
                                 <em>{% trans "All" %}</em>

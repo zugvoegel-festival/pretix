@@ -74,7 +74,8 @@ def env():
         code='FOO', event=event, email='dummy@dummy.test',
         status=Order.STATUS_PENDING,
         datetime=now(), expires=now() + timedelta(days=10),
-        total=14, locale='en'
+        total=14, locale='en',
+        sales_channel=event.organizer.sales_channels.get(identifier="web"),
     )
     o.payments.create(
         amount=o.total, provider='banktransfer', state=OrderPayment.PAYMENT_STATE_PENDING
@@ -873,6 +874,7 @@ def test_order_extend_expired_seat_taken(client, env):
             code='BAR', event=env[0], email='dummy@dummy.test',
             status=Order.STATUS_PENDING,
             datetime=now(), expires=now() + timedelta(days=10),
+            sales_channel=env[0].organizer.sales_channels.get(identifier="web"),
             total=14, locale='en'
         )
         OrderPosition.objects.create(
@@ -1103,6 +1105,7 @@ def test_order_mark_paid_expired_seat_taken(client, env):
             code='BAR', event=env[0], email='dummy@dummy.test',
             status=Order.STATUS_PENDING,
             datetime=now(), expires=now() + timedelta(days=10),
+            sales_channel=env[0].organizer.sales_channels.get(identifier="web"),
             total=14, locale='en'
         )
         OrderPosition.objects.create(
@@ -1128,6 +1131,49 @@ def test_order_mark_paid_expired_seat_taken(client, env):
         o = Order.objects.get(id=env[2].id)
     assert o.expires.strftime("%Y-%m-%d %H:%M:%S") == olddate.strftime("%Y-%m-%d %H:%M:%S")
     assert o.status == Order.STATUS_EXPIRED
+
+
+@pytest.mark.django_db
+def test_order_mark_paid_expired_blocked(client, env):
+    with scopes_disabled():
+        o = Order.objects.get(id=env[2].id)
+        o.expires = now() - timedelta(days=5)
+        o.status = Order.STATUS_EXPIRED
+        o.sales_channel = env[0].organizer.sales_channels.get(identifier="bar")
+        olddate = o.expires
+        o.save()
+        seat_a1 = env[0].seats.create(seat_number="A1", product=env[3], seat_guid="A1", blocked=True)
+        p = o.positions.first()
+        p.seat = seat_a1
+        p.save()
+
+        q = Quota.objects.create(event=env[0], size=100)
+        q.items.add(env[3])
+    client.login(email='dummy@dummy.dummy', password='dummy')
+    response = client.post('/control/event/dummy/dummy/orders/FOO/transition', {
+        'status': 'p',
+        'payment_date': now().date().isoformat(),
+        'amount': str(o.pending_sum),
+        'force': 'on'
+    }, follow=True)
+    assert b'alert-danger' in response.content
+    with scopes_disabled():
+        o = Order.objects.get(id=env[2].id)
+    assert o.expires.strftime("%Y-%m-%d %H:%M:%S") == olddate.strftime("%Y-%m-%d %H:%M:%S")
+    assert o.status == Order.STATUS_EXPIRED
+
+    env[0].settings.seating_allow_blocked_seats_for_channel = ["bar"]
+
+    response = client.post('/control/event/dummy/dummy/orders/FOO/transition', {
+        'status': 'p',
+        'payment_date': now().date().isoformat(),
+        'amount': str(o.pending_sum),
+        'force': 'on'
+    }, follow=True)
+    assert b'alert-success' in response.content
+    with scopes_disabled():
+        o = Order.objects.get(id=env[2].id)
+    assert o.status == Order.STATUS_PAID
 
 
 @pytest.mark.django_db
@@ -1224,7 +1270,7 @@ def test_order_sendmail_preview(client, order_url, env):
         follow=True)
 
     assert response.status_code == 200
-    assert 'E-mail preview' in response.content.decode()
+    assert 'Email preview' in response.content.decode()
     assert len(mail.outbox) == 0
 
 
@@ -1263,6 +1309,7 @@ class OrderChangeTests(SoupTest):
             code='FOO', event=self.event, email='dummy@dummy.test',
             status=Order.STATUS_PENDING,
             datetime=now(), expires=now() + timedelta(days=10),
+            sales_channel=self.event.organizer.sales_channels.get(identifier="web"),
             total=Decimal('46.00'),
         )
         self.tr7 = self.event.tax_rules.create(rate=Decimal('7.00'))
@@ -1305,10 +1352,14 @@ class OrderChangeTests(SoupTest):
         self.client.post('/control/event/{}/{}/orders/{}/change'.format(
             self.event.organizer.slug, self.event.slug, self.order.code
         ), {
-            'add-TOTAL_FORMS': '0',
-            'add-INITIAL_FORMS': '0',
-            'add-MIN_NUM_FORMS': '0',
-            'add-MAX_NUM_FORMS': '100',
+            'add_fee-TOTAL_FORMS': '0',
+            'add_fee-INITIAL_FORMS': '0',
+            'add_fee-MIN_NUM_FORMS': '0',
+            'add_fee-MAX_NUM_FORMS': '100',
+            'add_position-TOTAL_FORMS': '0',
+            'add_position-INITIAL_FORMS': '0',
+            'add_position-MIN_NUM_FORMS': '0',
+            'add_position-MAX_NUM_FORMS': '100',
             'op-{}-itemvar'.format(self.op1.pk): str(self.shirt.pk),
             'op-{}-price'.format(self.op1.pk): str('12.00'),
         })
@@ -1337,10 +1388,14 @@ class OrderChangeTests(SoupTest):
         self.client.post('/control/event/{}/{}/orders/{}/change'.format(
             self.event.organizer.slug, self.event.slug, self.order.code
         ), {
-            'add-TOTAL_FORMS': '0',
-            'add-INITIAL_FORMS': '0',
-            'add-MIN_NUM_FORMS': '0',
-            'add-MAX_NUM_FORMS': '100',
+            'add_fee-TOTAL_FORMS': '0',
+            'add_fee-INITIAL_FORMS': '0',
+            'add_fee-MIN_NUM_FORMS': '0',
+            'add_fee-MAX_NUM_FORMS': '100',
+            'add_position-TOTAL_FORMS': '0',
+            'add_position-INITIAL_FORMS': '0',
+            'add_position-MIN_NUM_FORMS': '0',
+            'add_position-MAX_NUM_FORMS': '100',
             'op-{}-subevent'.format(self.op1.pk): str(se2.pk),
         })
         self.op1.refresh_from_db()
@@ -1369,10 +1424,14 @@ class OrderChangeTests(SoupTest):
         self.client.post('/control/event/{}/{}/orders/{}/change'.format(
             self.event.organizer.slug, self.event.slug, self.order.code
         ), {
-            'add-TOTAL_FORMS': '0',
-            'add-INITIAL_FORMS': '0',
-            'add-MIN_NUM_FORMS': '0',
-            'add-MAX_NUM_FORMS': '100',
+            'add_fee-TOTAL_FORMS': '0',
+            'add_fee-INITIAL_FORMS': '0',
+            'add_fee-MIN_NUM_FORMS': '0',
+            'add_fee-MAX_NUM_FORMS': '100',
+            'add_position-TOTAL_FORMS': '0',
+            'add_position-INITIAL_FORMS': '0',
+            'add_position-MIN_NUM_FORMS': '0',
+            'add_position-MAX_NUM_FORMS': '100',
             'op-{}-used_membership'.format(self.op1.pk): str(m_correct1.pk),
             'op-{}-used_membership'.format(self.op2.pk): str(m_correct1.pk),
             'op-{}-used_membership'.format(self.op3.pk): str(m_correct1.pk),
@@ -1385,10 +1444,14 @@ class OrderChangeTests(SoupTest):
         self.client.post('/control/event/{}/{}/orders/{}/change'.format(
             self.event.organizer.slug, self.event.slug, self.order.code
         ), {
-            'add-TOTAL_FORMS': '0',
-            'add-INITIAL_FORMS': '0',
-            'add-MIN_NUM_FORMS': '0',
-            'add-MAX_NUM_FORMS': '100',
+            'add_fee-TOTAL_FORMS': '0',
+            'add_fee-INITIAL_FORMS': '0',
+            'add_fee-MIN_NUM_FORMS': '0',
+            'add_fee-MAX_NUM_FORMS': '100',
+            'add_position-TOTAL_FORMS': '0',
+            'add_position-INITIAL_FORMS': '0',
+            'add_position-MIN_NUM_FORMS': '0',
+            'add_position-MAX_NUM_FORMS': '100',
             'op-{}-operation'.format(self.op1.pk): 'price',
             'op-{}-itemvar'.format(self.op1.pk): str(self.ticket.pk),
             'op-{}-price'.format(self.op1.pk): '24.00',
@@ -1405,10 +1468,14 @@ class OrderChangeTests(SoupTest):
         self.client.post('/control/event/{}/{}/orders/{}/change'.format(
             self.event.organizer.slug, self.event.slug, self.order.code
         ), {
-            'add-TOTAL_FORMS': '0',
-            'add-INITIAL_FORMS': '0',
-            'add-MIN_NUM_FORMS': '0',
-            'add-MAX_NUM_FORMS': '100',
+            'add_fee-TOTAL_FORMS': '0',
+            'add_fee-INITIAL_FORMS': '0',
+            'add_fee-MIN_NUM_FORMS': '0',
+            'add_fee-MAX_NUM_FORMS': '100',
+            'add_position-TOTAL_FORMS': '0',
+            'add_position-INITIAL_FORMS': '0',
+            'add_position-MIN_NUM_FORMS': '0',
+            'add_position-MAX_NUM_FORMS': '100',
             'op-{}-operation_cancel'.format(self.op1.pk): 'on',
         })
         self.order.refresh_from_db()
@@ -1420,13 +1487,17 @@ class OrderChangeTests(SoupTest):
         self.client.post('/control/event/{}/{}/orders/{}/change'.format(
             self.event.organizer.slug, self.event.slug, self.order.code
         ), {
-            'add-TOTAL_FORMS': '1',
-            'add-INITIAL_FORMS': '0',
-            'add-MIN_NUM_FORMS': '0',
-            'add-MAX_NUM_FORMS': '100',
-            'add-0-itemvar': str(self.shirt.pk),
-            'add-0-do': 'on',
-            'add-0-price': '14.00',
+            'add_fee-TOTAL_FORMS': '0',
+            'add_fee-INITIAL_FORMS': '0',
+            'add_fee-MIN_NUM_FORMS': '0',
+            'add_fee-MAX_NUM_FORMS': '100',
+            'add_position-TOTAL_FORMS': '1',
+            'add_position-INITIAL_FORMS': '0',
+            'add_position-MIN_NUM_FORMS': '0',
+            'add_position-MAX_NUM_FORMS': '100',
+            'add_position-0-itemvar': str(self.shirt.pk),
+            'add_position-0-do': 'on',
+            'add_position-0-price': '14.00',
         })
         with scopes_disabled():
             assert self.order.positions.count() == 3
@@ -1449,10 +1520,14 @@ class OrderChangeTests(SoupTest):
         self.client.post('/control/event/{}/{}/orders/{}/change'.format(
             self.event.organizer.slug, self.event.slug, self.order.code
         ), {
-            'add-TOTAL_FORMS': '0',
-            'add-INITIAL_FORMS': '0',
-            'add-MIN_NUM_FORMS': '0',
-            'add-MAX_NUM_FORMS': '100',
+            'add_fee-TOTAL_FORMS': '0',
+            'add_fee-INITIAL_FORMS': '0',
+            'add_fee-MIN_NUM_FORMS': '0',
+            'add_fee-MAX_NUM_FORMS': '100',
+            'add_position-TOTAL_FORMS': '0',
+            'add_position-INITIAL_FORMS': '0',
+            'add_position-MIN_NUM_FORMS': '0',
+            'add_position-MAX_NUM_FORMS': '100',
             'other-recalculate_taxes': 'net',
             'op-{}-operation'.format(self.op1.pk): '',
             'op-{}-operation'.format(self.op2.pk): '',
@@ -1485,10 +1560,14 @@ class OrderChangeTests(SoupTest):
         self.client.post('/control/event/{}/{}/orders/{}/change'.format(
             self.event.organizer.slug, self.event.slug, self.order.code
         ), {
-            'add-TOTAL_FORMS': '0',
-            'add-INITIAL_FORMS': '0',
-            'add-MIN_NUM_FORMS': '0',
-            'add-MAX_NUM_FORMS': '100',
+            'add_fee-TOTAL_FORMS': '0',
+            'add_fee-INITIAL_FORMS': '0',
+            'add_fee-MIN_NUM_FORMS': '0',
+            'add_fee-MAX_NUM_FORMS': '100',
+            'add_position-TOTAL_FORMS': '0',
+            'add_position-INITIAL_FORMS': '0',
+            'add_position-MIN_NUM_FORMS': '0',
+            'add_position-MAX_NUM_FORMS': '100',
             'other-recalculate_taxes': 'gross',
             'op-{}-operation'.format(self.op1.pk): '',
             'op-{}-operation'.format(self.op2.pk): '',
@@ -1513,10 +1592,14 @@ class OrderChangeTests(SoupTest):
         self.client.post('/control/event/{}/{}/orders/{}/change'.format(
             self.event.organizer.slug, self.event.slug, self.order.code
         ), {
-            'add-TOTAL_FORMS': '0',
-            'add-INITIAL_FORMS': '0',
-            'add-MIN_NUM_FORMS': '0',
-            'add-MAX_NUM_FORMS': '100',
+            'add_fee-TOTAL_FORMS': '0',
+            'add_fee-INITIAL_FORMS': '0',
+            'add_fee-MIN_NUM_FORMS': '0',
+            'add_fee-MAX_NUM_FORMS': '100',
+            'add_position-TOTAL_FORMS': '0',
+            'add_position-INITIAL_FORMS': '0',
+            'add_position-MIN_NUM_FORMS': '0',
+            'add_position-MAX_NUM_FORMS': '100',
             'op-{}-price'.format(self.op1.pk): '24.00',
             'op-{}-operation'.format(self.op2.pk): '',
             'op-{}-itemvar'.format(self.op2.pk): str(self.ticket.pk),
@@ -1540,10 +1623,14 @@ class OrderChangeTests(SoupTest):
         self.client.post('/control/event/{}/{}/orders/{}/change'.format(
             self.event.organizer.slug, self.event.slug, self.order.code
         ), {
-            'add-TOTAL_FORMS': '0',
-            'add-INITIAL_FORMS': '0',
-            'add-MIN_NUM_FORMS': '0',
-            'add-MAX_NUM_FORMS': '100',
+            'add_fee-TOTAL_FORMS': '0',
+            'add_fee-INITIAL_FORMS': '0',
+            'add_fee-MIN_NUM_FORMS': '0',
+            'add_fee-MAX_NUM_FORMS': '100',
+            'add_position-TOTAL_FORMS': '0',
+            'add_position-INITIAL_FORMS': '0',
+            'add_position-MIN_NUM_FORMS': '0',
+            'add_position-MAX_NUM_FORMS': '100',
             'op-{}-operation'.format(self.op1.pk): 'price',
             'op-{}-itemvar'.format(self.op1.pk): str(self.ticket.pk),
             'op-{}-price'.format(self.op1.pk): '24.00',
@@ -1558,6 +1645,34 @@ class OrderChangeTests(SoupTest):
         self.op1.refresh_from_db()
         self.op2.refresh_from_db()
         assert self.order.total == self.op1.price + self.op2.price
+
+    def test_add_fee_success(self):
+        old_total = self.order.total
+        r = self.client.post('/control/event/{}/{}/orders/{}/change'.format(
+            self.event.organizer.slug, self.event.slug, self.order.code
+        ), {
+            'add_fee-TOTAL_FORMS': '1',
+            'add_fee-INITIAL_FORMS': '0',
+            'add_fee-MIN_NUM_FORMS': '0',
+            'add_fee-MAX_NUM_FORMS': '100',
+            'add_position-TOTAL_FORMS': '0',
+            'add_position-INITIAL_FORMS': '0',
+            'add_position-MIN_NUM_FORMS': '0',
+            'add_position-MAX_NUM_FORMS': '100',
+            'add_fee-0-do': 'on',
+            'add_fee-0-fee_type': 'other',
+            'add_fee-0-description': 'Surprise Fee',
+            'add_fee-0-value': '5.00',
+        })
+        assert r.status_code == 302
+        self.order.refresh_from_db()
+        with scopes_disabled():
+            fee = self.order.fees.get()
+        assert fee.fee_type == OrderFee.FEE_TYPE_OTHER
+        assert fee.description == 'Surprise Fee'
+        assert fee.value == Decimal('5.00')
+        assert not fee.canceled
+        assert self.order.total == old_total + 5
 
 
 @pytest.mark.django_db
@@ -1890,6 +2005,7 @@ def test_refund_paid_order_fully_mark_as_refunded(client, env):
         'start-action': 'mark_refunded',
         'refund-manual': '14.00',
         'manual_state': 'done',
+        'last_known_refund_id': 0,
         'perform': 'on'
     }, follow=True)
     p.refresh_from_db()
@@ -1918,6 +2034,7 @@ def test_refund_paid_order_fully_mark_as_pending(client, env):
         'start-action': 'mark_pending',
         'refund-manual': '14.00',
         'manual_state': 'pending',
+        'last_known_refund_id': 0,
         'perform': 'on'
     }, follow=True)
     p.refresh_from_db()
@@ -1951,6 +2068,7 @@ def test_refund_paid_order_partially_mark_as_pending(client, env):
         'start-action': 'mark_pending',
         'refund-manual': '7.00',
         'manual_state': 'pending',
+        'last_known_refund_id': 0,
         'perform': 'on'
     }, follow=True)
     p.refresh_from_db()
@@ -2040,6 +2158,7 @@ def test_refund_amount_does_not_match_or_invalid(client, env):
         'refund-manual': '4.00',
         'refund-{}'.format(p.pk): '4.00',
         'manual_state': 'pending',
+        'last_known_refund_id': 0,
         'perform': 'on'
     }, follow=True)
     assert b'alert-danger' in resp.content
@@ -2051,6 +2170,7 @@ def test_refund_amount_does_not_match_or_invalid(client, env):
         'refund-manual': '0.00',
         'refund-{}'.format(p.pk): '15.00',
         'manual_state': 'pending',
+        'last_known_refund_id': 0,
         'perform': 'on'
     }, follow=True)
     assert b'alert-danger' in resp.content
@@ -2062,6 +2182,7 @@ def test_refund_amount_does_not_match_or_invalid(client, env):
         'refund-manual': '-3.00',
         'refund-{}'.format(p.pk): '10.00',
         'manual_state': 'pending',
+        'last_known_refund_id': 0,
         'perform': 'on'
     }, follow=True)
     assert b'alert-danger' in resp.content
@@ -2073,6 +2194,7 @@ def test_refund_amount_does_not_match_or_invalid(client, env):
         'refund-manual': 'AA',
         'refund-{}'.format(p.pk): '10.00',
         'manual_state': 'pending',
+        'last_known_refund_id': 0,
         'perform': 'on'
     }, follow=True)
     assert b'alert-danger' in resp.content
@@ -2109,6 +2231,7 @@ def test_refund_paid_order_automatically_failed(client, env, monkeypatch):
         'start-action': 'mark_pending',
         'refund-{}'.format(p.pk): '7.00',
         'manual_state': 'pending',
+        'last_known_refund_id': 0,
         'perform': 'on'
     }, follow=True)
     assert b'This failed.' in r.content
@@ -2156,6 +2279,7 @@ def test_refund_paid_order_automatically(client, env, monkeypatch):
         'start-action': 'mark_pending',
         'refund-{}'.format(p.pk): '7.00',
         'manual_state': 'pending',
+        'last_known_refund_id': 0,
         'perform': 'on'
     }, follow=True)
     p.refresh_from_db()
@@ -2183,6 +2307,7 @@ def test_refund_paid_order_offsetting_to_unknown(client, env):
         'refund-offsetting': '5.00',
         'order-offsetting': 'BAZ',
         'manual_state': 'pending',
+        'last_known_refund_id': 0,
         'perform': 'on'
     }, follow=True)
     assert b'alert-danger' in r.content
@@ -2206,6 +2331,7 @@ def test_refund_paid_order_offsetting_to_wrong_currency(client, env):
             code='BAZ', event=event2, email='dummy@dummy.test',
             status=Order.STATUS_PENDING,
             datetime=now(), expires=now() + timedelta(days=10),
+            sales_channel=event2.organizer.sales_channels.get(identifier="web"),
             total=5, locale='en'
         )
         o.positions.create(price=5, item=ticket2)
@@ -2217,6 +2343,7 @@ def test_refund_paid_order_offsetting_to_wrong_currency(client, env):
         'refund-offsetting': '5.00',
         'order-offsetting': 'BAZ',
         'manual_state': 'pending',
+        'last_known_refund_id': 0,
         'perform': 'on'
     }, follow=True)
     assert b'alert-danger' in r.content
@@ -2233,6 +2360,7 @@ def test_refund_paid_order_offsetting(client, env):
             code='BAZ', event=env[0], email='dummy@dummy.test',
             status=Order.STATUS_PENDING,
             datetime=now(), expires=now() + timedelta(days=10),
+            sales_channel=env[0].organizer.sales_channels.get(identifier="web"),
             total=5, locale='en'
         )
 
@@ -2243,6 +2371,7 @@ def test_refund_paid_order_offsetting(client, env):
         'refund-offsetting': '5.00',
         'order-offsetting': 'BAZ',
         'manual_state': 'pending',
+        'last_known_refund_id': 0,
         'perform': 'on'
     }, follow=True)
     p.refresh_from_db()
@@ -2263,6 +2392,36 @@ def test_refund_paid_order_offsetting(client, env):
 
 
 @pytest.mark.django_db
+def test_refund_prevent_duplicate_submit(client, env):
+    with scopes_disabled():
+        p = env[2].payments.last()
+        p.confirm()
+        client.login(email='dummy@dummy.dummy', password='dummy')
+        Order.objects.create(
+            code='BAZ', event=env[0], email='dummy@dummy.test',
+            status=Order.STATUS_PENDING,
+            datetime=now(), expires=now() + timedelta(days=10),
+            sales_channel=env[0].organizer.sales_channels.get(identifier="web"),
+            total=5, locale='en'
+        )
+        env[2].refunds.create(provider="manual", amount=Decimal("2.00"), state=OrderRefund.REFUND_STATE_CREATED)
+
+    r = client.post('/control/event/dummy/dummy/orders/FOO/refund', {
+        'start-partial_amount': '5.00',
+        'start-mode': 'partial',
+        'start-action': 'mark_pending',
+        'refund-offsetting': '5.00',
+        'order-offsetting': 'BAZ',
+        'manual_state': 'pending',
+        'last_known_refund_id': 0,
+        'perform': 'on'
+    }, follow=True)
+    assert b'alert-danger' in r.content
+    with scopes_disabled():
+        assert env[2].refunds.count() == 1
+
+
+@pytest.mark.django_db
 def test_refund_paid_order_giftcard(client, env):
     with scopes_disabled():
         p = env[2].payments.last()
@@ -2275,6 +2434,7 @@ def test_refund_paid_order_giftcard(client, env):
         'start-action': 'mark_pending',
         'refund-new-giftcard': '5.00',
         'manual_state': 'pending',
+        'last_known_refund_id': 0,
         'perform': 'on'
     }, follow=True)
     p.refresh_from_db()

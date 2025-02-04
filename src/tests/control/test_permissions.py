@@ -55,6 +55,7 @@ def env():
         status=Order.STATUS_PENDING,
         datetime=now(), expires=now() + timedelta(days=10),
         total=0,
+        sales_channel=event.organizer.sales_channels.get(identifier="web"),
     )
     Team.objects.create(pk=1, organizer=o)
     return event, user, o
@@ -71,6 +72,8 @@ superuser_urls = [
     "users/1/",
     "users/1/impersonate",
     "users/1/reset",
+    "users/1/anonymize",
+    "users/1/emergencytoken",
     "sudo/sessions/",
 ]
 
@@ -321,7 +324,7 @@ event_permission_urls = [
     ("can_change_items", "items/add", 200, HTTP_GET),
     ("can_change_items", "items/1/up", 404, HTTP_POST),
     ("can_change_items", "items/1/down", 404, HTTP_POST),
-    ("can_change_items", "items/reorder", 400, HTTP_POST),
+    ("can_change_items", "items/reorder/2/", 400, HTTP_POST),
     ("can_change_items", "items/1/delete", 404, HTTP_GET),
     # ("can_change_items", "categories/", 200),
     # We don't have to create categories and similar objects
@@ -534,6 +537,10 @@ organizer_permission_urls = [
     ("can_change_organizer_settings", "organizer/dummy/property/add", 200),
     ("can_change_organizer_settings", "organizer/dummy/property/1/edit", 404),
     ("can_change_organizer_settings", "organizer/dummy/property/1/delete", 404),
+    ("can_change_organizer_settings", "organizer/dummy/channels", 200),
+    ("can_change_organizer_settings", "organizer/dummy/channel/add", 200),
+    ("can_change_organizer_settings", "organizer/dummy/channel/web/edit", 200),
+    ("can_change_organizer_settings", "organizer/dummy/channel/web/delete", 200),
     ("can_change_organizer_settings", "organizer/dummy/membershiptypes", 200),
     ("can_change_organizer_settings", "organizer/dummy/membershiptype/add", 200),
     ("can_change_organizer_settings", "organizer/dummy/membershiptype/1/edit", 404),

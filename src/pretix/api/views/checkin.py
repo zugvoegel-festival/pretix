@@ -35,6 +35,7 @@ from django.http import Http404
 from django.shortcuts import get_object_or_404
 from django.utils.functional import cached_property
 from django.utils.timezone import now
+from django.utils.translation import gettext
 from django_filters.rest_framework import DjangoFilterBackend, FilterSet
 from django_scopes import scopes_disabled
 from packaging.version import parse
@@ -61,6 +62,7 @@ from pretix.base.models import (
     CachedFile, Checkin, CheckinList, Device, Event, Order, OrderPosition,
     Question, ReusableMedium, RevokedTicketSecret, TeamAPIToken,
 )
+from pretix.base.models.orders import PrintLog
 from pretix.base.services.checkin import (
     CheckInError, RequiredQuestionsError, SQLLogic, perform_checkin,
 )
@@ -114,7 +116,7 @@ class CheckinListViewSet(viewsets.ModelViewSet):
         if 'subevent' in self.request.query_params.getlist('expand'):
             qs = qs.prefetch_related(
                 'subevent', 'subevent__event', 'subevent__subeventitem_set', 'subevent__subeventitemvariation_set',
-                'subevent__seat_category_mappings', 'subevent__meta_values'
+                'subevent__seat_category_mappings', 'subevent__meta_values',
             )
         return qs
 
@@ -141,7 +143,9 @@ class CheckinListViewSet(viewsets.ModelViewSet):
             data=self.request.data
         )
 
+    @transaction.atomic
     def perform_destroy(self, instance):
+        instance.checkins.all().delete()
         instance.log_action(
             'pretix.event.checkinlist.deleted',
             user=self.request.user,
@@ -285,6 +289,8 @@ with scopes_disabled():
             return queryset.filter(last_checked_in__isnull=not value)
 
         def check_rules_qs(self, queryset, name, value):
+            if not value:
+                return queryset
             if not self.checkinlist.rules:
                 return queryset
             return queryset.filter(
@@ -362,8 +368,9 @@ def _checkin_list_position_queryset(checkinlists, ignore_status=False, ignore_pr
         qs = qs.prefetch_related(
             Prefetch(
                 lookup='checkins',
-                queryset=Checkin.objects.filter(list_id__in=[cl.pk for cl in checkinlists])
+                queryset=Checkin.objects.filter(list_id__in=[cl.pk for cl in checkinlists]).select_related('device')
             ),
+            Prefetch('print_logs', queryset=PrintLog.objects.select_related('device')),
             'answers', 'answers__options', 'answers__question',
             Prefetch('addons', OrderPosition.objects.select_related('item', 'variation')),
             Prefetch('order', Order.objects.select_related('invoice_address').prefetch_related(
@@ -374,7 +381,8 @@ def _checkin_list_position_queryset(checkinlists, ignore_status=False, ignore_pr
                 Prefetch(
                     'positions',
                     OrderPosition.objects.prefetch_related(
-                        Prefetch('checkins', queryset=Checkin.objects.all()),
+                        Prefetch('checkins', queryset=Checkin.objects.select_related('device')),
+                        Prefetch('print_logs', queryset=PrintLog.objects.select_related('device')),
                         'item', 'variation', 'answers', 'answers__options', 'answers__question',
                     )
                 )
@@ -386,8 +394,9 @@ def _checkin_list_position_queryset(checkinlists, ignore_status=False, ignore_pr
         qs = qs.prefetch_related(
             Prefetch(
                 lookup='checkins',
-                queryset=Checkin.objects.filter(list_id__in=[cl.pk for cl in checkinlists])
+                queryset=Checkin.objects.filter(list_id__in=[cl.pk for cl in checkinlists]).select_related('device')
             ),
+            Prefetch('print_logs', queryset=PrintLog.objects.select_related('device')),
             'answers', 'answers__options', 'answers__question',
             Prefetch('addons', OrderPosition.objects.select_related('item', 'variation'))
         ).select_related('item', 'variation', 'order', 'addon_to', 'order__invoice_address', 'order', 'seat')
@@ -403,7 +412,7 @@ def _checkin_list_position_queryset(checkinlists, ignore_status=False, ignore_pr
                                  'item__variations').select_related('item__tax_rule')
 
     if expand and 'variation' in expand:
-        qs = qs.prefetch_related('variation')
+        qs = qs.prefetch_related('variation', 'variation__meta_values')
 
     return qs
 
@@ -584,6 +593,32 @@ def _redeem_process(*, checkinlists, raw_barcode, answers_data, datetime, force,
                     'list': MiniCheckinListSerializer(list_by_event[revoked_matches[0].event_id]).data,
                 }, status=400)
         else:
+            if media.linked_orderposition.order.event_id not in list_by_event:
+                # Medium exists but connected ticket is for the wrong event
+                if not simulate:
+                    checkinlists[0].event.log_action('pretix.event.checkin.unknown', data={
+                        'datetime': datetime,
+                        'type': checkin_type,
+                        'list': checkinlists[0].pk,
+                        'barcode': raw_barcode,
+                        'searched_lists': [cl.pk for cl in checkinlists]
+                    }, user=user, auth=auth)
+                    Checkin.objects.create(
+                        position=None,
+                        successful=False,
+                        error_reason=Checkin.REASON_INVALID,
+                        error_explanation=gettext('Medium connected to other event'),
+                        **common_checkin_args,
+                    )
+                return Response({
+                    'detail': 'Not found.',  # for backwards compatibility
+                    'status': 'error',
+                    'reason': Checkin.REASON_INVALID,
+                    'reason_explanation': gettext('Medium connected to other event'),
+                    'require_attention': False,
+                    'checkin_texts': [],
+                    'list': MiniCheckinListSerializer(checkinlists[0]).data,
+                }, status=404)
             op_candidates = [media.linked_orderposition]
             if list_by_event[media.linked_orderposition.order.event_id].addon_match:
                 op_candidates += list(media.linked_orderposition.addons.all())

@@ -85,6 +85,7 @@ def order(event, item, taxrule, question):
             status=Order.STATUS_PENDING, secret="k24fiuwvu8kxz3y1",
             datetime=datetime.datetime(2017, 12, 1, 10, 0, 0, tzinfo=datetime.timezone.utc),
             expires=datetime.datetime(2017, 12, 10, 10, 0, 0, tzinfo=datetime.timezone.utc),
+            sales_channel=event.organizer.sales_channels.get(identifier="web"),
             total=23, locale='en'
         )
         p1 = o.payments.create(
@@ -148,6 +149,7 @@ def order2(event2, item2):
             status=Order.STATUS_PENDING, secret="asd436cvbfd1",
             datetime=datetime.datetime(2017, 12, 1, 10, 0, 0, tzinfo=datetime.timezone.utc),
             expires=datetime.datetime(2017, 12, 10, 10, 0, 0, tzinfo=datetime.timezone.utc),
+            sales_channel=event2.organizer.sales_channels.get(identifier="web"),
             total=23, locale='en'
         )
         o.payments.create(
@@ -237,6 +239,7 @@ TEST_INVOICE_RES = {
             "gross_value": "23.00",
             "tax_value": "0.00",
             "tax_name": "",
+            "tax_code": None,
             "tax_rate": "0.00"
         },
         {
@@ -253,6 +256,7 @@ TEST_INVOICE_RES = {
             'variation': None,
             "gross_value": "0.25",
             "tax_value": "0.05",
+            "tax_code": None,
             "tax_name": "",
             "tax_rate": "19.00"
         }
@@ -307,6 +311,20 @@ def test_invoice_list(token_client, organizer, event, order, item, invoice):
     resp = token_client.get('/api/v1/organizers/{}/events/{}/invoices/?refers={}'.format(
         organizer.slug, event.slug, ic.number))
     assert [] == resp.data['results']
+
+
+@pytest.mark.django_db
+def test_invoice_list_multi_filter(token_client, organizer, event, order, order2, item, invoice, invoice2):
+    order2.event = event
+    order2.save()
+    invoice2.event = event
+    invoice2.save()
+    resp = token_client.get('/api/v1/organizers/{}/events/{}/invoices/?order=FOO'.format(organizer.slug, event.slug))
+    assert len(resp.data['results']) == 1
+    resp = token_client.get('/api/v1/organizers/{}/events/{}/invoices/?order=BAR'.format(organizer.slug, event.slug))
+    assert len(resp.data['results']) == 1
+    resp = token_client.get('/api/v1/organizers/{}/events/{}/invoices/?order=FOO&order=BAR'.format(organizer.slug, event.slug))
+    assert len(resp.data['results']) == 2
 
 
 @pytest.mark.django_db

@@ -28,6 +28,8 @@ TEST_DIR = os.path.dirname(__file__)
 TEMPLATES[0]['DIRS'].append(os.path.join(TEST_DIR, 'templates'))  # NOQA
 
 INSTALLED_APPS.append('tests.testdummy')  # NOQA
+INSTALLED_APPS.append('tests.testdummyrestricted')  # NOQA
+INSTALLED_APPS.append('tests.testdummyhidden')  # NOQA
 
 PRETIX_AUTH_BACKENDS = [
     'pretix.base.auth.NativeAuthBackend',

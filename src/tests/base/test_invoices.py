@@ -66,7 +66,8 @@ def env():
             code='FOO', event=event, email='dummy@dummy.test',
             status=Order.STATUS_PENDING,
             datetime=now(), expires=now() + timedelta(days=10),
-            total=0, locale='en'
+            total=0, locale='en',
+            sales_channel=event.organizer.sales_channels.get(identifier="web"),
         )
         tr = event.tax_rules.create(rate=Decimal('19.00'))
         o.fees.create(fee_type=OrderFee.FEE_TYPE_PAYMENT, value=Decimal('0.25'), tax_rate=Decimal('19.00'),
@@ -233,6 +234,7 @@ def test_reverse_charge_note(env):
     assert inv.foreign_currency_rate == Decimal("4.2408")
     assert inv.foreign_currency_rate_date == date.today()
     assert inv.foreign_currency_source == 'eu:ecb:eurofxref-daily'
+    assert inv.lines.first().tax_code == "AE"
 
 
 @pytest.mark.django_db
@@ -248,6 +250,7 @@ def test_custom_tax_note(env):
             'address_type': '',
             'action': 'vat',
             'rate': '20',
+            'code': 'S/reduced',
             'invoice_text': {
                 'de': 'Polnische Steuer anwendbar',
                 'en': 'Polish tax applies'
@@ -267,6 +270,7 @@ def test_custom_tax_note(env):
 
     inv = generate_invoice(order)
     assert "Polish tax applies" in inv.additional_text
+    assert inv.lines.first().tax_code == "S/reduced"
 
 
 @pytest.mark.django_db
@@ -442,16 +446,18 @@ def test_invoice_numbers(env):
         status=Order.STATUS_PENDING,
         datetime=now(), expires=now() + timedelta(days=10),
         total=0,
-        locale='en'
+        locale='en',
+        sales_channel=event.organizer.sales_channels.get(identifier="web"),
     )
     order2.fees.create(fee_type=OrderFee.FEE_TYPE_PAYMENT, value=Decimal('0.25'), tax_rate=Decimal('0.00'),
                        tax_value=Decimal('0.00'))
     testorder = Order.objects.create(
-        code='BAR', event=event, email='dummy2@dummy.test',
+        code='TESTBAR', event=event, email='dummy2@dummy.test',
         status=Order.STATUS_PENDING,
         datetime=now(), expires=now() + timedelta(days=10),
         total=0, testmode=True,
-        locale='en'
+        locale='en',
+        sales_channel=event.organizer.sales_channels.get(identifier="web"),
     )
     inv1 = generate_invoice(order)
     inv2 = generate_invoice(order)
@@ -519,7 +525,8 @@ def test_invoice_number_prefixes(env):
         status=Order.STATUS_PENDING,
         datetime=now(), expires=now() + timedelta(days=10),
         total=0,
-        locale='en'
+        locale='en',
+        sales_channel=event2.organizer.sales_channels.get(identifier="web"),
     )
     order2.fees.create(fee_type=OrderFee.FEE_TYPE_PAYMENT, value=Decimal('0.25'), tax_rate=Decimal('0.00'),
                        tax_value=Decimal('0.00'))

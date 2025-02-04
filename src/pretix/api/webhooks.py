@@ -126,6 +126,17 @@ class ParametrizedOrderWebhookEvent(ParametrizedWebhookEvent):
         }
 
 
+class DeletedOrderWebhookEvent(ParametrizedWebhookEvent):
+    def build_payload(self, logentry: LogEntry):
+        return {
+            'notification_id': logentry.pk,
+            'organizer': logentry.organizer.slug,
+            'event': logentry.event.slug,
+            'code': logentry.parsed_data.get("code"),
+            'action': logentry.action_type,
+        }
+
+
 class ParametrizedEventWebhookEvent(ParametrizedWebhookEvent):
 
     def build_payload(self, logentry: LogEntry):
@@ -176,7 +187,7 @@ class ParametrizedItemWebhookEvent(ParametrizedWebhookEvent):
         }
 
 
-class ParametrizedOrderPositionWebhookEvent(ParametrizedOrderWebhookEvent):
+class ParametrizedOrderPositionCheckinWebhookEvent(ParametrizedOrderWebhookEvent):
 
     def build_payload(self, logentry: LogEntry):
         d = super().build_payload(logentry)
@@ -185,6 +196,7 @@ class ParametrizedOrderPositionWebhookEvent(ParametrizedOrderWebhookEvent):
         d['orderposition_id'] = logentry.parsed_data.get('position')
         d['orderposition_positionid'] = logentry.parsed_data.get('positionid')
         d['checkin_list'] = logentry.parsed_data.get('list')
+        d['type'] = logentry.parsed_data.get('type')
         d['first_checkin'] = logentry.parsed_data.get('first_checkin')
         return d
 
@@ -296,11 +308,15 @@ def register_default_webhook_events(sender, **kwargs):
             'pretix.event.order.denied',
             _('Order denied'),
         ),
-        ParametrizedOrderPositionWebhookEvent(
+        DeletedOrderWebhookEvent(
+            'pretix.event.order.deleted',
+            _('Order deleted'),
+        ),
+        ParametrizedOrderPositionCheckinWebhookEvent(
             'pretix.event.checkin',
             _('Ticket checked in'),
         ),
-        ParametrizedOrderPositionWebhookEvent(
+        ParametrizedOrderPositionCheckinWebhookEvent(
             'pretix.event.checkin.reverted',
             _('Ticket check-in reverted'),
         ),

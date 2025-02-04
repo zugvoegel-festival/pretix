@@ -67,6 +67,7 @@ def order(event, item, other_item, taxrule):
             status=Order.STATUS_PAID, secret="k24fiuwvu8kxz3y1",
             datetime=datetime.datetime(2017, 12, 1, 10, 0, 0, tzinfo=datetime.timezone.utc),
             expires=datetime.datetime(2017, 12, 10, 10, 0, 0, tzinfo=datetime.timezone.utc),
+            sales_channel=event.organizer.sales_channels.get(identifier="web"),
             total=46, locale='en'
         )
         InvoiceAddress.objects.create(order=o, company="Sample company", country=Country('NZ'))
@@ -114,6 +115,7 @@ def order2(event2, item_on_event2):
             status=Order.STATUS_PAID, secret="ylptCPNOxTyA",
             datetime=datetime.datetime(2017, 12, 1, 10, 0, 0, tzinfo=datetime.timezone.utc),
             expires=datetime.datetime(2017, 12, 10, 10, 0, 0, tzinfo=datetime.timezone.utc),
+            sales_channel=event2.organizer.sales_channels.get(identifier="web"),
             total=46, locale='en'
         )
         InvoiceAddress.objects.create(order=o, company="Sample company", country=Country('NZ'))
@@ -144,6 +146,8 @@ TEST_ORDERPOSITION1_RES = {
     "id": 1,
     "require_attention": False,
     "order__status": "p",
+    "order__require_approval": False,
+    "order__valid_if_pending": False,
     "order": "FOO",
     "positionid": 1,
     "item": 1,
@@ -159,6 +163,7 @@ TEST_ORDERPOSITION1_RES = {
     "secret": "z3fsn8jyufm5kpk768q69gkbyr5f4h6w",
     "addon_to": None,
     "checkins": [],
+    "print_logs": [],
     "downloads": [],
     "answers": [],
     "seat": None,
@@ -306,6 +311,25 @@ def test_by_medium_not_connected(token_client, organizer, clist, event, order):
     assert resp.status_code == 404
     assert resp.data['status'] == 'error'
     assert resp.data['reason'] == 'invalid'
+
+
+@pytest.mark.django_db
+def test_by_medium_wrong_event(token_client, organizer, clist, event, order2):
+    with scopes_disabled():
+        ReusableMedium.objects.create(
+            type="barcode",
+            identifier="abcdef",
+            organizer=organizer,
+            linked_orderposition=order2.positions.first(),
+        )
+    resp = _redeem(token_client, organizer, clist, "abcdef", {"source_type": "barcode"})
+    assert resp.status_code == 404
+    assert resp.data['status'] == 'error'
+    assert resp.data['reason'] == 'invalid'
+    with scopes_disabled():
+        ci = clist.checkins.get()
+    assert ci.raw_barcode == "abcdef"
+    assert ci.raw_source_type == "barcode"
 
 
 @pytest.mark.django_db

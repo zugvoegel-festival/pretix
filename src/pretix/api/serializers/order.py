@@ -46,17 +46,16 @@ from pretix.api.serializers.i18n import I18nAwareModelSerializer
 from pretix.api.serializers.item import (
     InlineItemVariationSerializer, ItemSerializer, QuestionSerializer,
 )
-from pretix.base.channels import get_all_sales_channels
 from pretix.base.decimal import round_decimal
 from pretix.base.i18n import language
 from pretix.base.models import (
     CachedFile, Checkin, Customer, Invoice, InvoiceAddress, InvoiceLine, Item,
     ItemVariation, Order, OrderPosition, Question, QuestionAnswer,
-    ReusableMedium, Seat, SubEvent, TaxRule, Voucher,
+    ReusableMedium, SalesChannel, Seat, SubEvent, TaxRule, Voucher,
 )
 from pretix.base.models.orders import (
     BlockedTicketSecret, CartPosition, OrderFee, OrderPayment, OrderRefund,
-    RevokedTicketSecret,
+    PrintLog, RevokedTicketSecret,
 )
 from pretix.base.pdf import get_images, get_variables
 from pretix.base.services.cart import error_messages
@@ -166,7 +165,7 @@ class InlineSeatSerializer(I18nAwareModelSerializer):
 
     class Meta:
         model = Seat
-        fields = ('id', 'name', 'seat_guid')
+        fields = ('id', 'name', 'seat_guid', 'zone_name', 'row_name', 'row_label', 'seat_label', 'seat_number')
 
 
 class AnswerSerializer(I18nAwareModelSerializer):
@@ -274,9 +273,35 @@ class AnswerSerializer(I18nAwareModelSerializer):
 
 
 class CheckinSerializer(I18nAwareModelSerializer):
+    device_id = serializers.SlugRelatedField(
+        source='device',
+        slug_field='device_id',
+        read_only=True,
+    )
+
     class Meta:
         model = Checkin
-        fields = ('id', 'datetime', 'list', 'auto_checked_in', 'gate', 'device', 'type')
+        fields = ('id', 'datetime', 'list', 'auto_checked_in', 'gate', 'device', 'device_id', 'type')
+
+
+class PrintLogSerializer(serializers.ModelSerializer):
+    device_id = serializers.SlugRelatedField(
+        source='device',
+        slug_field='device_id',
+        read_only=True,
+    )
+
+    class Meta:
+        model = PrintLog
+        fields = (
+            "id",
+            "successful",
+            "datetime",
+            "source",
+            "type",
+            "device_id",
+            "info",
+        )
 
 
 class FailedCheckinSerializer(I18nAwareModelSerializer):
@@ -471,6 +496,7 @@ class OrderPositionListSerializer(serializers.ListSerializer):
 
 class OrderPositionSerializer(I18nAwareModelSerializer):
     checkins = CheckinSerializer(many=True, read_only=True)
+    print_logs = PrintLogSerializer(many=True, read_only=True)
     answers = AnswerSerializer(many=True)
     downloads = PositionDownloadsField(source='*', read_only=True)
     order = serializers.SlugRelatedField(slug_field='code', read_only=True)
@@ -485,12 +511,13 @@ class OrderPositionSerializer(I18nAwareModelSerializer):
         fields = ('id', 'order', 'positionid', 'item', 'variation', 'price', 'attendee_name', 'attendee_name_parts',
                   'company', 'street', 'zipcode', 'city', 'country', 'state', 'discount',
                   'attendee_email', 'voucher', 'tax_rate', 'tax_value', 'secret', 'addon_to', 'subevent', 'checkins',
-                  'downloads', 'answers', 'tax_rule', 'pseudonymization_id', 'pdf_data', 'seat', 'canceled',
-                  'valid_from', 'valid_until', 'blocked')
+                  'print_logs', 'downloads', 'answers', 'tax_rule', 'pseudonymization_id', 'pdf_data', 'seat', 'canceled',
+                  'print_logs', 'downloads', 'answers', 'tax_rule', 'tax_code', 'pseudonymization_id', 'pdf_data', 'seat',
+                  'canceled', 'valid_from', 'valid_until', 'blocked', 'voucher_budget_use')
         read_only_fields = (
             'id', 'order', 'positionid', 'item', 'variation', 'price', 'voucher', 'tax_rate', 'tax_value', 'secret',
-            'addon_to', 'subevent', 'checkins', 'downloads', 'answers', 'tax_rule', 'pseudonymization_id', 'pdf_data',
-            'seat', 'canceled', 'discount', 'valid_from', 'valid_until', 'blocked'
+            'addon_to', 'subevent', 'checkins', 'downloads', 'answers', 'tax_rule', 'tax_code', 'pseudonymization_id',
+            'pdf_data', 'seat', 'canceled', 'discount', 'valid_from', 'valid_until', 'blocked', 'voucher_budget_use'
         )
 
     def __init__(self, *args, **kwargs):
@@ -564,14 +591,17 @@ class CheckinListOrderPositionSerializer(OrderPositionSerializer):
     attendee_name = AttendeeNameField(source='*')
     attendee_name_parts = AttendeeNamePartsField(source='*')
     order__status = serializers.SlugRelatedField(read_only=True, slug_field='status', source='order')
+    order__valid_if_pending = serializers.SlugRelatedField(read_only=True, slug_field='valid_if_pending', source='order')
+    order__require_approval = serializers.SlugRelatedField(read_only=True, slug_field='require_approval', source='order')
 
     class Meta:
         model = OrderPosition
         fields = ('id', 'order', 'positionid', 'item', 'variation', 'price', 'attendee_name', 'attendee_name_parts',
                   'company', 'street', 'zipcode', 'city', 'country', 'state',
                   'attendee_email', 'voucher', 'tax_rate', 'tax_value', 'secret', 'addon_to', 'subevent', 'checkins',
-                  'downloads', 'answers', 'tax_rule', 'pseudonymization_id', 'pdf_data', 'seat', 'require_attention',
-                  'order__status', 'valid_from', 'valid_until', 'blocked')
+                  'print_logs', 'downloads', 'answers', 'tax_rule', 'pseudonymization_id', 'pdf_data', 'seat',
+                  'require_attention', 'order__status', 'order__valid_if_pending', 'order__require_approval',
+                  'valid_from', 'valid_until', 'blocked')
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -583,7 +613,7 @@ class CheckinListOrderPositionSerializer(OrderPositionSerializer):
             self.fields['item'] = ItemSerializer(read_only=True, context=self.context)
 
         if 'variation' in self.context['expand']:
-            self.fields['variation'] = InlineItemVariationSerializer(read_only=True)
+            self.fields['variation'] = InlineItemVariationSerializer(read_only=True, context=self.context)
 
         if 'answers.question' in self.context['expand']:
             self.fields['answers'].child.fields['question'] = QuestionSerializer(read_only=True)
@@ -613,7 +643,8 @@ class OrderPaymentDateField(serializers.DateField):
 class OrderFeeSerializer(I18nAwareModelSerializer):
     class Meta:
         model = OrderFee
-        fields = ('id', 'fee_type', 'value', 'description', 'internal_type', 'tax_rate', 'tax_value', 'tax_rule', 'canceled')
+        fields = ('id', 'fee_type', 'value', 'description', 'internal_type', 'tax_rate', 'tax_value', 'tax_rule',
+                  'tax_code', 'canceled')
 
 
 class PaymentURLField(serializers.URLField):
@@ -711,6 +742,11 @@ class OrderSerializer(I18nAwareModelSerializer):
     payment_provider = OrderPaymentTypeField(source='*', read_only=True)
     url = OrderURLField(source='*', read_only=True)
     customer = serializers.SlugRelatedField(slug_field='identifier', read_only=True)
+    sales_channel = serializers.SlugRelatedField(
+        slug_field='identifier',
+        queryset=SalesChannel.objects.none(),
+        required=False,
+    )
 
     class Meta:
         model = Order
@@ -719,16 +755,20 @@ class OrderSerializer(I18nAwareModelSerializer):
             'code', 'event', 'status', 'testmode', 'secret', 'email', 'phone', 'locale', 'datetime', 'expires', 'payment_date',
             'payment_provider', 'fees', 'total', 'comment', 'custom_followup_at', 'invoice_address', 'positions', 'downloads',
             'checkin_attention', 'checkin_text', 'last_modified', 'payments', 'refunds', 'require_approval', 'sales_channel',
-            'url', 'customer', 'valid_if_pending'
+            'url', 'customer', 'valid_if_pending', 'api_meta', 'cancellation_date'
         )
         read_only_fields = (
             'code', 'status', 'testmode', 'secret', 'datetime', 'expires', 'payment_date',
             'payment_provider', 'fees', 'total', 'positions', 'downloads', 'customer',
-            'last_modified', 'payments', 'refunds', 'require_approval', 'sales_channel'
+            'last_modified', 'payments', 'refunds', 'require_approval', 'sales_channel', 'cancellation_date'
         )
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        if "organizer" in self.context:
+            self.fields["sales_channel"].queryset = self.context["organizer"].sales_channels.all()
+        else:
+            self.fields["sales_channel"].queryset = self.context["event"].organizer.sales_channels.all()
         if not self.context['pdf_data']:
             self.fields['positions'].child.fields.pop('pdf_data', None)
 
@@ -775,7 +815,7 @@ class OrderSerializer(I18nAwareModelSerializer):
         # Even though all fields that shouldn't be edited are marked as read_only in the serializer
         # (hopefully), we'll be extra careful here and be explicit about the model fields we update.
         update_fields = ['comment', 'custom_followup_at', 'checkin_attention', 'checkin_text', 'email', 'locale',
-                         'phone', 'valid_if_pending']
+                         'phone', 'valid_if_pending', 'api_meta']
 
         if 'invoice_address' in validated_data:
             iadata = validated_data.pop('invoice_address')
@@ -1030,19 +1070,25 @@ class OrderCreateSerializer(I18nAwareModelSerializer):
     require_approval = serializers.BooleanField(default=False, required=False)
     simulate = serializers.BooleanField(default=False, required=False)
     customer = serializers.SlugRelatedField(slug_field='identifier', queryset=Customer.objects.none(), required=False)
+    sales_channel = serializers.SlugRelatedField(
+        slug_field='identifier',
+        queryset=SalesChannel.objects.none(),
+        required=False,
+    )
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.fields['positions'].child.fields['voucher'].queryset = self.context['event'].vouchers.all()
         self.fields['customer'].queryset = self.context['event'].organizer.customers.all()
         self.fields['expires'].required = False
+        self.fields["sales_channel"].queryset = self.context["event"].organizer.sales_channels.all()
 
     class Meta:
         model = Order
         fields = ('code', 'status', 'testmode', 'email', 'phone', 'locale', 'payment_provider', 'fees', 'comment', 'sales_channel',
                   'invoice_address', 'positions', 'checkin_attention', 'checkin_text', 'payment_info', 'payment_date',
                   'consume_carts', 'force', 'send_email', 'simulate', 'customer', 'custom_followup_at',
-                  'require_approval', 'valid_if_pending', 'expires')
+                  'require_approval', 'valid_if_pending', 'expires', 'api_meta')
 
     def validate_payment_provider(self, pp):
         if pp is None:
@@ -1055,11 +1101,6 @@ class OrderCreateSerializer(I18nAwareModelSerializer):
         if expires < now():
             raise ValidationError('Expiration date must be in the future.')
         return expires
-
-    def validate_sales_channel(self, channel):
-        if channel not in get_all_sales_channels():
-            raise ValidationError('Unknown sales channel.')
-        return channel
 
     def validate_code(self, code):
         if code and Order.objects.filter(event__organizer=self.context['event'].organizer, code=code).exists():
@@ -1122,20 +1163,6 @@ class OrderCreateSerializer(I18nAwareModelSerializer):
             raise ValidationError(errs)
         return data
 
-    def validate_testmode(self, testmode):
-        if 'sales_channel' in self.initial_data:
-            try:
-                sales_channel = get_all_sales_channels()[self.initial_data['sales_channel']]
-
-                if testmode and not sales_channel.testmode_supported:
-                    raise ValidationError('This sales channel does not provide support for test mode.')
-            except KeyError:
-                # We do not need to raise a ValidationError here, since there is another check to validate the
-                # sales_channel
-                pass
-
-        return testmode
-
     def create(self, validated_data):
         fees_data = validated_data.pop('fees') if 'fees' in validated_data else []
         positions_data = validated_data.pop('positions') if 'positions' in validated_data else []
@@ -1144,9 +1171,16 @@ class OrderCreateSerializer(I18nAwareModelSerializer):
         payment_date = validated_data.pop('payment_date', now())
         force = validated_data.pop('force', False)
         simulate = validated_data.pop('simulate', False)
+
+        if not validated_data.get("sales_channel"):
+            validated_data["sales_channel"] = self.context['event'].organizer.sales_channels.get(identifier="web")
+
+        if validated_data.get("testmode") and not validated_data["sales_channel"].type_instance.testmode_supported:
+            raise ValidationError({"testmode": ["This sales channel does not provide support for test mode."]})
+
         self._send_mail = validated_data.pop('send_email', False)
         if self._send_mail is None:
-            self._send_mail = validated_data.get('sales_channel') in self.context['event'].settings.mail_sales_channel_placed_paid
+            self._send_mail = validated_data["sales_channel"].identifier in self.context['event'].settings.mail_sales_channel_placed_paid
 
         if 'invoice_address' in validated_data:
             iadata = validated_data.pop('invoice_address')
@@ -1306,7 +1340,8 @@ class OrderCreateSerializer(I18nAwareModelSerializer):
                     errs[i]['seat'] = ['The specified seat does not exist.']
                 else:
                     seat_usage[seat] += 1
-                    if (seat_usage[seat] > 0 and not seat.is_available(sales_channel=validated_data.get('sales_channel', 'web'))) or seat_usage[seat] > 1:
+                    sales_channel_id = validated_data['sales_channel'].identifier
+                    if (seat_usage[seat] > 0 and not seat.is_available(sales_channel=sales_channel_id)) or seat_usage[seat] > 1:
                         errs[i]['seat'] = [gettext_lazy('The selected seat "{seat}" is not available.').format(seat=seat.name)]
             elif seated:
                 errs[i]['seat'] = ['The specified product requires to choose a seat.']
@@ -1315,7 +1350,7 @@ class OrderCreateSerializer(I18nAwareModelSerializer):
             if 'valid_from' not in pos_data and 'valid_until' not in pos_data:
                 valid_from, valid_until = pos_data['item'].compute_validity(
                     requested_start=(
-                        max(requested_valid_from, now())
+                        requested_valid_from
                         if requested_valid_from and pos_data['item'].validity_dynamic_start_choice
                         else now()
                     ),
@@ -1365,6 +1400,7 @@ class OrderCreateSerializer(I18nAwareModelSerializer):
 
         if validated_data.get('locale', None) is None:
             validated_data['locale'] = self.context['event'].settings.locale
+
         order = Order(event=self.context['event'], **validated_data)
         if not validated_data.get('expires'):
             order.set_expires(subevents=[p.get('subevent') for p in positions_data])
@@ -1439,6 +1475,7 @@ class OrderCreateSerializer(I18nAwareModelSerializer):
                     if not pos.item.tax_rule or pos.item.tax_rule.price_includes_tax:
                         price_after_voucher = max(pos.price, pos.voucher.calculate_price(listed_price))
                     else:
+                        pos._calculate_tax(invoice_address=ia)
                         price_after_voucher = max(pos.price - pos.tax_value, pos.voucher.calculate_price(listed_price))
                 else:
                     price_after_voucher = listed_price
@@ -1466,7 +1503,7 @@ class OrderCreateSerializer(I18nAwareModelSerializer):
             answers_data = pos_data.pop('answers', [])
             use_reusable_medium = pos_data.pop('use_reusable_medium', None)
             pos = pos_data['__instance']
-            pos._calculate_tax()
+            pos._calculate_tax(invoice_address=ia)
 
             if simulate:
                 pos = WrappedModel(pos)
@@ -1480,6 +1517,7 @@ class OrderCreateSerializer(I18nAwareModelSerializer):
                 pos.answers = answers
                 pos.pseudonymization_id = "PREVIEW"
                 pos.checkins = []
+                pos.print_logs = []
                 pos_map[pos.positionid] = pos
             else:
                 if pos.voucher:
@@ -1585,7 +1623,10 @@ class OrderCreateSerializer(I18nAwareModelSerializer):
         if order.total == Decimal('0.00') and validated_data.get('status') == Order.STATUS_PAID and not payment_provider:
             payment_provider = 'free'
 
-        if order.total == Decimal('0.00') and validated_data.get('status') != Order.STATUS_PAID:
+        if order.total != Decimal('0.00') and order.event.currency == "XXX":
+            raise ValidationError('Paid products not supported without a valid currency.')
+
+        if order.total == Decimal('0.00') and validated_data.get('status') != Order.STATUS_PAID and not validated_data.get('require_approval'):
             order.status = Order.STATUS_PAID
             order.save()
             order.payments.create(
@@ -1597,6 +1638,8 @@ class OrderCreateSerializer(I18nAwareModelSerializer):
         elif validated_data.get('status') == Order.STATUS_PAID:
             if not payment_provider:
                 raise ValidationError('You cannot create a paid order without a payment provider.')
+            if validated_data.get('require_approval'):
+                raise ValidationError('You cannot create a paid order that requires approval.')
             order.payments.create(
                 amount=order.total,
                 provider=payment_provider,
@@ -1635,7 +1678,7 @@ class InlineInvoiceLineSerializer(I18nAwareModelSerializer):
     class Meta:
         model = InvoiceLine
         fields = ('position', 'description', 'item', 'variation', 'subevent', 'attendee_name', 'event_date_from',
-                  'event_date_to', 'gross_value', 'tax_value', 'tax_rate', 'tax_name', 'fee_type',
+                  'event_date_to', 'gross_value', 'tax_value', 'tax_rate', 'tax_code', 'tax_name', 'fee_type',
                   'fee_internal_type', 'event_location')
 
 

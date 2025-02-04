@@ -132,6 +132,7 @@ def test_medium_detail(token_client, organizer, event, medium, giftcard, custome
         o = Order.objects.create(
             code='FOO', event=event, email='dummy@dummy.test',
             status=Order.STATUS_PENDING, datetime=now(), expires=now() + timedelta(days=10),
+            sales_channel=event.organizer.sales_channels.get(identifier="web"),
             total=14, locale='en'
         )
         ticket = event.items.create(name='Early-bird ticket', category=None, default_price=23, admission=True,
@@ -155,6 +156,7 @@ def test_medium_detail(token_client, organizer, event, medium, giftcard, custome
             "identifier": customer.identifier,
             "external_identifier": None,
             "email": "foo@example.org",
+            "phone": None,
             "name": "Foo",
             "name_parts": {"_legacy": "Foo"},
             "is_active": True,
@@ -183,12 +185,15 @@ def test_medium_detail(token_client, organizer, event, medium, giftcard, custome
             "discount": None,
             "attendee_email": None,
             "voucher": None,
+            "voucher_budget_use": None,
             "tax_rate": "0.00",
             "tax_value": "0.00",
+            "tax_code": None,
             "secret": op.secret,
             "addon_to": None,
             "subevent": None,
             "checkins": [],
+            "print_logs": [],
             "downloads": [],
             "answers": [],
             "tax_rule": None,
@@ -407,6 +412,7 @@ def test_medium_lookup_cross_organizer(token_client, organizer, organizer2, org2
         o = Order.objects.create(
             code='FOO', event=org2_event, email='dummy@dummy.test',
             status=Order.STATUS_PENDING, datetime=now(), expires=now() + timedelta(days=10),
+            sales_channel=org2_event.organizer.sales_channels.get(identifier="web"),
             total=14, locale='en'
         )
         ticket = org2_event.items.create(name='Early-bird ticket', category=None, default_price=23, admission=True,

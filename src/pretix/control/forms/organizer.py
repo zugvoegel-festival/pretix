@@ -48,15 +48,20 @@ from django.utils.safestring import mark_safe
 from django.utils.translation import gettext_lazy as _, pgettext_lazy
 from django_scopes.forms import SafeModelChoiceField
 from i18nfield.forms import (
-    I18nForm, I18nFormField, I18nFormSetMixin, I18nTextarea, I18nTextInput,
+    I18nForm, I18nFormField, I18nFormSetMixin, I18nTextInput,
 )
+from i18nfield.strings import LazyI18nString
 from phonenumber_field.formfields import PhoneNumberField
 from pytz import common_timezones
 
+from pretix.api.auth.devicesecurity import get_all_security_profiles
 from pretix.api.models import WebHook
 from pretix.api.webhooks import get_all_webhook_events
 from pretix.base.customersso.oidc import oidc_validate_and_complete_config
-from pretix.base.forms import I18nModelForm, PlaceholderValidator, SettingsForm
+from pretix.base.forms import (
+    SECRET_REDACTED, I18nMarkdownTextarea, I18nModelForm, PlaceholderValidator,
+    SecretKeySettingsField, SettingsForm,
+)
 from pretix.base.forms.questions import (
     NamePartsFormField, WrappedPhoneNumberPrefixWidget, get_country_by_locale,
     get_phone_prefix,
@@ -66,7 +71,8 @@ from pretix.base.forms.widgets import (
 )
 from pretix.base.models import (
     Customer, Device, EventMetaProperty, Gate, GiftCard, GiftCardAcceptance,
-    Membership, MembershipType, OrderPosition, Organizer, ReusableMedium, Team,
+    Membership, MembershipType, OrderPosition, Organizer, ReusableMedium,
+    SalesChannel, Team,
 )
 from pretix.base.models.customers import CustomerSSOClient, CustomerSSOProvider
 from pretix.base.models.organizer import OrganizerFooterLink
@@ -127,63 +133,108 @@ class OrganizerDeleteForm(forms.Form):
 class OrganizerUpdateForm(OrganizerForm):
 
     def __init__(self, *args, **kwargs):
-        self.domain = kwargs.pop('domain', False)
         self.change_slug = kwargs.pop('change_slug', False)
         kwargs.setdefault('initial', {})
         self.instance = kwargs['instance']
-        if self.domain and self.instance:
-            initial_domain = self.instance.domains.filter(event__isnull=True).first()
-            if initial_domain:
-                kwargs['initial'].setdefault('domain', initial_domain.domainname)
 
         super().__init__(*args, **kwargs)
         if not self.change_slug:
             self.fields['slug'].widget.attrs['readonly'] = 'readonly'
-        if self.domain:
-            self.fields['domain'] = forms.CharField(
-                max_length=255,
-                label=_('Custom domain'),
-                required=False,
-                help_text=_('You need to configure the custom domain in the webserver beforehand.')
-            )
-
-    def clean_domain(self):
-        d = self.cleaned_data['domain']
-        if d:
-            if d == urlparse(settings.SITE_URL).hostname:
-                raise ValidationError(
-                    _('You cannot choose the base domain of this installation.')
-                )
-            if KnownDomain.objects.filter(domainname=d).exclude(organizer=self.instance.pk,
-                                                                event__isnull=True).exists():
-                raise ValidationError(
-                    _('This domain is already in use for a different event or organizer.')
-                )
-        return d
 
     def clean_slug(self):
         if self.change_slug:
             return self.cleaned_data['slug']
         return self.instance.slug
 
-    def save(self, commit=True):
-        instance = super().save(commit)
 
-        if self.domain:
-            current_domain = instance.domains.filter(event__isnull=True).first()
-            if self.cleaned_data['domain']:
-                if current_domain and current_domain.domainname != self.cleaned_data['domain']:
-                    current_domain.delete()
-                    KnownDomain.objects.create(organizer=instance, domainname=self.cleaned_data['domain'])
-                elif not current_domain:
-                    KnownDomain.objects.create(organizer=instance, domainname=self.cleaned_data['domain'])
-            elif current_domain:
-                current_domain.delete()
-            instance.cache.clear()
-            for ev in instance.events.all():
-                ev.cache.clear()
+class KnownDomainForm(forms.ModelForm):
+    class Meta:
+        model = KnownDomain
+        fields = ["domainname", "mode", "event"]
+        field_classes = {
+            "event": SafeModelChoiceField,
+        }
 
-        return instance
+    def __init__(self, *args, **kwargs):
+        self.organizer = kwargs.pop('organizer')
+        super().__init__(*args, **kwargs)
+        self.fields["event"].queryset = self.organizer.events.all()
+        if self.instance and self.instance.pk:
+            self.fields["domainname"].widget.attrs['readonly'] = 'readonly'
+
+    def clean_domainname(self):
+        if self.instance and self.instance.pk:
+            return self.instance.domainname
+        d = self.cleaned_data['domainname']
+        if d:
+            if d == urlparse(settings.SITE_URL).hostname:
+                raise ValidationError(
+                    _('You cannot choose the base domain of this installation.')
+                )
+            if KnownDomain.objects.filter(domainname=d).exclude(organizer=self.instance.organizer).exists():
+                raise ValidationError(
+                    _('This domain is already in use for a different event or organizer.')
+                )
+        return d
+
+    def clean(self):
+        d = super().clean()
+
+        if d["mode"] == KnownDomain.MODE_ORG_DOMAIN and d["event"]:
+            raise ValidationError(
+                _("Do not choose an event for this mode.")
+            )
+
+        if d["mode"] == KnownDomain.MODE_ORG_ALT_DOMAIN and d["event"]:
+            raise ValidationError(
+                _("Do not choose an event for this mode. You can assign events to this domain in event settings.")
+            )
+
+        if d["mode"] == KnownDomain.MODE_EVENT_DOMAIN and not d["event"]:
+            raise ValidationError(
+                _("You need to choose an event.")
+            )
+
+        return d
+
+
+class BaseKnownDomainFormSet(forms.BaseInlineFormSet):
+    def __init__(self, *args, **kwargs):
+        self.organizer = kwargs.pop('organizer')
+        super().__init__(*args, **kwargs)
+
+    def _construct_form(self, i, **kwargs):
+        kwargs['organizer'] = self.organizer
+        return super()._construct_form(i, **kwargs)
+
+    @property
+    def empty_form(self):
+        form = self.form(
+            auto_id=self.auto_id,
+            prefix=self.add_prefix('__prefix__'),
+            empty_permitted=True,
+            use_required_attribute=False,
+            organizer=self.organizer,
+        )
+        self.add_fields(form, None)
+        return form
+
+    def clean(self):
+        super().clean()
+        data = [f.cleaned_data for f in self.forms]
+
+        if len([d for d in data if d.get("mode") == KnownDomain.MODE_ORG_DOMAIN and not d.get("DELETE")]) > 1:
+            raise ValidationError(_("You may set only one organizer domain."))
+
+        return data
+
+
+KnownDomainFormset = inlineformset_factory(
+    Organizer, KnownDomain,
+    KnownDomainForm,
+    formset=BaseKnownDomainFormSet,
+    can_order=False, can_delete=True, extra=0
+)
 
 
 class SafeOrderPositionChoiceField(forms.ModelChoiceField):
@@ -257,7 +308,7 @@ class TeamForm(forms.ModelForm):
 
     class Meta:
         model = Team
-        fields = ['name', 'all_events', 'limit_events', 'can_create_events',
+        fields = ['name', 'require_2fa', 'all_events', 'limit_events', 'can_create_events',
                   'can_change_teams', 'can_change_organizer_settings',
                   'can_manage_gift_cards', 'can_manage_customers',
                   'can_manage_reusable_media',
@@ -306,6 +357,11 @@ class DeviceForm(forms.ModelForm):
             '-has_subevents', '-date_from'
         )
         self.fields['gate'].queryset = organizer.gates.all()
+        self.fields['security_profile'] = forms.ChoiceField(
+            label=self.fields['security_profile'].label,
+            help_text=self.fields['security_profile'].help_text,
+            choices=[(k, v.verbose_name) for k, v in get_all_security_profiles().items()],
+        )
 
     def clean(self):
         d = super().clean()
@@ -339,6 +395,11 @@ class DeviceBulkEditForm(forms.ModelForm):
             '-has_subevents', '-date_from'
         )
         self.fields['gate'].queryset = organizer.gates.all()
+        self.fields['security_profile'] = forms.ChoiceField(
+            label=self.fields['security_profile'].label,
+            help_text=self.fields['security_profile'].help_text,
+            choices=[(k, v.verbose_name) for k, v in get_all_security_profiles().items()],
+        )
 
     def clean(self):
         d = super().clean()
@@ -524,7 +585,7 @@ class MailSettingsForm(SettingsForm):
     mail_text_signature = I18nFormField(
         label=_("Signature"),
         required=False,
-        widget=I18nTextarea,
+        widget=I18nMarkdownTextarea,
         help_text=_("This will be attached to every email."),
         validators=[PlaceholderValidator([])],
         widget_kwargs={'attrs': {
@@ -543,7 +604,7 @@ class MailSettingsForm(SettingsForm):
     mail_text_customer_registration = I18nFormField(
         label=_("Text"),
         required=False,
-        widget=I18nTextarea,
+        widget=I18nMarkdownTextarea,
     )
     mail_subject_customer_email_change = I18nFormField(
         label=_("Subject"),
@@ -553,7 +614,7 @@ class MailSettingsForm(SettingsForm):
     mail_text_customer_email_change = I18nFormField(
         label=_("Text"),
         required=False,
-        widget=I18nTextarea,
+        widget=I18nMarkdownTextarea,
     )
     mail_subject_customer_reset = I18nFormField(
         label=_("Subject"),
@@ -563,7 +624,7 @@ class MailSettingsForm(SettingsForm):
     mail_text_customer_reset = I18nFormField(
         label=_("Text"),
         required=False,
-        widget=I18nTextarea,
+        widget=I18nMarkdownTextarea,
     )
 
     base_context = {
@@ -954,7 +1015,7 @@ class SSOProviderForm(I18nModelForm):
         label=pgettext_lazy('sso_oidc', 'Client ID'),
         required=False,
     )
-    config_oidc_client_secret = forms.CharField(
+    config_oidc_client_secret = SecretKeySettingsField(
         label=pgettext_lazy('sso_oidc', 'Client secret'),
         required=False,
     )
@@ -980,6 +1041,15 @@ class SSOProviderForm(I18nModelForm):
     )
     config_oidc_phone_field = forms.CharField(
         label=pgettext_lazy('sso_oidc', 'Phone field'),
+        required=False,
+    )
+    config_oidc_query_parameters = forms.CharField(
+        label=pgettext_lazy('sso_oidc', 'Query parameters'),
+        help_text=pgettext_lazy('sso_oidc', 'Optional query parameters, that will be added to calls to '
+                                            'the authorization endpoint. Enter as: {example}'.format(
+                                                example='<code>param1=value1&amp;param2=value2</code>'
+                                            ),
+                                ),
         required=False,
     )
 
@@ -1011,7 +1081,13 @@ class SSOProviderForm(I18nModelForm):
                 if self.instance and self.instance.method == method:
                     f.initial = self.instance.configuration.get(suffix)
 
+    def _unmask_secret_fields(self):
+        for k, v in self.cleaned_data.items():
+            if isinstance(self.fields.get(k), SecretKeySettingsField) and self.cleaned_data.get(k) == SECRET_REDACTED:
+                self.cleaned_data[k] = self.fields[k].initial
+
     def clean(self):
+        self._unmask_secret_fields()
         data = self.cleaned_data
         if not data.get("method"):
             return data
@@ -1088,3 +1164,40 @@ class GiftCardAcceptanceInviteForm(forms.Form):
         if self.organizer.gift_card_acceptor_acceptance.filter(acceptor=acceptor).exists():
             raise ValidationError(_('The selected organizer has already been invited.'))
         return acceptor
+
+
+class SalesChannelForm(I18nModelForm):
+    class Meta:
+        model = SalesChannel
+        fields = ['label', 'identifier']
+        widgets = {
+            'default': forms.TextInput(),
+        }
+
+    def __init__(self, *args, **kwargs):
+        self.type = kwargs.pop("type")
+        super().__init__(*args, **kwargs)
+
+        if not self.type.multiple_allowed or (self.instance and self.instance.pk):
+            self.fields["identifier"].initial = self.type.identifier
+            self.fields["identifier"].disabled = True
+            self.fields["label"].initial = LazyI18nString.from_gettext(self.type.verbose_name)
+
+    def clean(self):
+        d = super().clean()
+
+        if self.instance.pk:
+            d["identifier"] = self.instance.identifier
+        elif self.type.multiple_allowed:
+            d["identifier"] = self.type.identifier + "." + d["identifier"]
+        else:
+            d["identifier"] = self.type.identifier
+
+        if not self.instance.pk:
+            # self.event is actually the organizer, sorry I18nModelForm!
+            if self.event.sales_channels.filter(identifier=d["identifier"]).exists():
+                raise ValidationError(
+                    _("A sales channel with the same identifier already exists.")
+                )
+
+        return d

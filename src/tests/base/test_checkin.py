@@ -68,6 +68,7 @@ def position(event, item):
         datetime=now() - timedelta(days=4),
         expires=now() - timedelta(hours=4) + timedelta(days=10),
         total=Decimal('23.00'),
+        sales_channel=event.organizer.sales_channels.get(identifier="web"),
     )
     return OrderPosition.objects.create(
         order=order, item=item, variation=None,
@@ -744,6 +745,33 @@ def test_rules_scan_days(event, position, clist):
             perform_checkin(position, clist, {})
         assert excinfo.value.code == 'rules'
         assert 'Maximum number of days with an entry exceeded.' in str(excinfo.value)
+
+
+@pytest.mark.django_db
+def test_rules_scan_entry_status(position, clist):
+    # Ticket is valid three times
+    clist.allow_multiple_entries = True
+    clist.rules = {
+        "or": [
+            {"==": [{"var": "entry_status"}, "absent"]},
+            {"<": [{"var": "entries_number"}, 1]}
+        ]
+    }
+    clist.save()
+
+    assert OrderPosition.objects.filter(SQLLogic(clist).apply(clist.rules), pk=position.pk).exists()
+    perform_checkin(position, clist, {})
+
+    assert not OrderPosition.objects.filter(SQLLogic(clist).apply(clist.rules), pk=position.pk).exists()
+    with pytest.raises(CheckInError) as excinfo:
+        perform_checkin(position, clist, {})
+    assert excinfo.value.code == 'rules'
+    assert "Attendee is already checked in." in str(excinfo.value)
+
+    perform_checkin(position, clist, {}, type=Checkin.TYPE_EXIT)
+
+    assert OrderPosition.objects.filter(SQLLogic(clist).apply(clist.rules), pk=position.pk).exists()
+    perform_checkin(position, clist, {})
 
 
 @pytest.mark.django_db

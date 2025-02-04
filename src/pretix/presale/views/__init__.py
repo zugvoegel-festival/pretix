@@ -170,9 +170,20 @@ class CartMixin:
             )
 
             if not grouping_allowed:
-                return (pos.pk,) + (0, ) * 6
+                return (pos.pk,)
             else:
-                return (pos.addon_to_id or 0), pos.subevent_id, pos.item_id, pos.variation_id, pos.price, (pos.voucher_id or 0), (pos.seat_id or 0)
+                return (
+                    (pos.addon_to_id or 0),
+                    pos.subevent_id,
+                    pos.item_id,
+                    pos.variation_id,
+                    pos.price,
+                    (pos.voucher_id or 0),
+                    (pos.seat_id or 0),
+                    pos.valid_from,
+                    pos.valid_until,
+                    pos.used_membership_id,
+                )
 
         positions = []
         for k, g in groupby(sorted(lcp, key=lambda c: c.sort_key), key=group_key):
@@ -240,7 +251,8 @@ class CartMixin:
             'seconds_left': seconds_left,
             'first_expiry': first_expiry,
             'is_ordered': bool(order),
-            'itemcount': sum(c.count for c in positions if not c.addon_to)
+            'itemcount': sum(c.count for c in positions if not c.addon_to),
+            'current_selected_payments': [p for p in self.current_selected_payments(total) if p.get('multi_use_supported')]
         }
 
     def current_selected_payments(self, total, warn=False, total_includes_payment_fees=False):
@@ -307,14 +319,14 @@ def cart_exists(request):
 
 def get_cart(request):
     from pretix.presale.views.cart import get_or_create_cart_id
-    qqs = request.event.questions.all()
-    qqs = qqs.filter(ask_during_checkin=False, hidden=False)
 
     if not hasattr(request, '_cart_cache'):
         cart_id = get_or_create_cart_id(request, create=False)
         if not cart_id:
             request._cart_cache = CartPosition.objects.none()
         else:
+            qqs = request.event.questions.all()
+            qqs = qqs.filter(ask_during_checkin=False, hidden=False)
             request._cart_cache = CartPosition.objects.filter(
                 cart_id=cart_id, event=request.event
             ).annotate(

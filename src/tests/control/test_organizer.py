@@ -81,13 +81,6 @@ class OrganizerTest(SoupTest):
         assert self.orga1.name == "CCC e.V."
 
     def test_organizer_display_settings(self):
-        called = False
-
-        def set_called(*args, **kwargs):
-            nonlocal called
-            called = True
-
-        self.monkeypatch.setattr("pretix.presale.style.regenerate_organizer_css.apply_async", set_called)
         assert not self.orga1.settings.presale_css_checksum
         doc = self.get_doc('/control/organizer/%s/edit' % (self.orga1.slug,))
         doc.select("[name=settings-primary_color]")[0]['value'] = "#33c33c"
@@ -99,7 +92,6 @@ class OrganizerTest(SoupTest):
             assert doc.select("[name=settings-primary_color]")[0]['value'] == "#33c33c"
         self.orga1.settings.flush()
         assert self.orga1.settings.primary_color == "#33c33c"
-        assert called
 
     def test_email_settings(self):
         doc = self.get_doc('/control/organizer/%s/settings/email' % self.orga1.slug)
@@ -331,3 +323,60 @@ class OrganizerTest(SoupTest):
             p = self.orga1.sso_providers.get()
             assert p.configuration['scope'] == 'openid email'
             assert p.configuration['provider_config'] == conf
+
+    def test_sales_channel_add_edit_remove(self):
+        doc = self.post_doc(
+            '/control/organizer/%s/channel/add?type=api' % self.orga1.slug,
+            {
+                'label_0': 'API 1',
+                'identifier': 'custom',
+            },
+            follow=True
+        )
+        assert not doc.select('.has-error, .alert-danger')
+        with scopes_disabled():
+            assert str(self.orga1.sales_channels.get(identifier="api.custom").label) == "API 1"
+
+        doc = self.post_doc(
+            '/control/organizer/%s/channel/api.custom/edit' % self.orga1.slug,
+            {
+                'label_0': 'API 2',
+            },
+            follow=True
+        )
+        assert not doc.select('.has-error, .alert-danger')
+        with scopes_disabled():
+            assert str(self.orga1.sales_channels.get(identifier="api.custom").label) == "API 2"
+
+        doc = self.post_doc(
+            '/control/organizer/%s/channel/api.custom/delete' % self.orga1.slug,
+            {},
+            follow=True
+        )
+        assert not doc.select('.has-error, .alert-danger')
+        with scopes_disabled():
+            assert not self.orga1.sales_channels.filter(identifier="api.custom").exists()
+
+    def test_sales_channel_add_invalid_type(self):
+        doc = self.post_doc(
+            '/control/organizer/%s/channel/add?type=web' % self.orga1.slug,
+            {
+                'label_0': 'API 1',
+                'identifier': 'custom',
+            },
+            follow=True
+        )
+        assert doc.select('.large-link-group')
+
+    def test_sales_channel_delete_invalid(self):
+        doc = self.post_doc(
+            '/control/organizer/%s/channel/web/delete' % self.orga1.slug,
+            {
+                'label_0': 'API 1',
+                'identifier': 'custom',
+            },
+            follow=True
+        )
+        assert doc.select('.alert-danger')
+        with scopes_disabled():
+            assert self.orga1.sales_channels.filter(identifier="web").exists()

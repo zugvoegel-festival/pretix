@@ -52,12 +52,11 @@ from django.utils.translation import (
 )
 from django_scopes import scopes_disabled
 
-from pretix.base.channels import get_all_sales_channels
 from pretix.base.i18n import language
 from pretix.base.media import MEDIA_TYPES
 from pretix.base.models import (
-    CartPosition, Event, InvoiceAddress, Item, ItemVariation, Seat,
-    SeatCategoryMapping, Voucher,
+    CartPosition, Event, InvoiceAddress, Item, ItemVariation, SalesChannel,
+    Seat, SeatCategoryMapping, Voucher,
 )
 from pretix.base.models.event import SubEvent
 from pretix.base.models.orders import OrderFee
@@ -74,6 +73,7 @@ from pretix.base.services.tasks import ProfiledEventTask
 from pretix.base.settings import PERSON_NAME_SCHEMES, LazyI18nStringList
 from pretix.base.signals import validate_cart_addons
 from pretix.base.templatetags.rich_text import rich_text
+from pretix.base.timemachine import time_machine_now, time_machine_now_assigned
 from pretix.celery_app import app
 from pretix.presale.signals import (
     checkout_confirm_messages, fee_calculation_for_cart,
@@ -203,7 +203,7 @@ error_messages = {
         'You need to select at least %(min)s add-ons from the category %(cat)s for the product %(base)s.',
         'min'
     ),
-    'addon_no_multi': gettext_lazy('You can select every add-ons from the category %(cat)s for the product %(base)s at most once.'),
+    'addon_no_multi': gettext_lazy('You can select every add-on from the category %(cat)s for the product %(base)s at most once.'),
     'addon_only': gettext_lazy('One of the products you selected can only be bought as an add-on to another product.'),
     'bundled_only': gettext_lazy('One of the products you selected can only be bought part of a bundle.'),
     'seat_required': gettext_lazy('You need to select a specific seat.'),
@@ -274,11 +274,11 @@ class CartManager:
         AddOperation: 30
     }
 
-    def __init__(self, event: Event, cart_id: str, invoice_address: InvoiceAddress=None, widget_data=None,
-                 sales_channel='web'):
+    def __init__(self, event: Event, cart_id: str, sales_channel: SalesChannel,
+                 invoice_address: InvoiceAddress=None, widget_data=None, expiry=None):
         self.event = event
         self.cart_id = cart_id
-        self.now_dt = now()
+        self.real_now_dt = now()
         self._operations = []
         self._quota_diff = Counter()
         self._voucher_use_diff = Counter()
@@ -287,6 +287,7 @@ class CartManager:
         self._variations_cache = {}
         self._seated_cache = {}
         self._expiry = None
+        self._explicit_expiry = expiry
         self.invoice_address = invoice_address
         self._widget_data = widget_data or {}
         self._sales_channel = sales_channel
@@ -305,10 +306,15 @@ class CartManager:
         return self._seated_cache[item, subevent]
 
     def _calculate_expiry(self):
-        self._expiry = self.now_dt + timedelta(minutes=self.event.settings.get('reservation_time', as_type=int))
+        if self._explicit_expiry:
+            self._expiry = self._explicit_expiry
+        else:
+            self._expiry = self.real_now_dt + timedelta(
+                minutes=self.event.settings.get('reservation_time', as_type=int)
+            )
 
     def _check_presale_dates(self):
-        if self.event.presale_start and self.now_dt < self.event.presale_start:
+        if self.event.presale_start and time_machine_now(self.real_now_dt) < self.event.presale_start:
             raise CartError(error_messages['not_started'])
         if self.event.presale_has_ended:
             raise CartError(error_messages['ended'])
@@ -319,13 +325,13 @@ class CartManager:
                     tlv.datetime(self.event).date(),
                     time(hour=23, minute=59, second=59)
                 ), self.event.timezone)
-                if term_last < self.now_dt:
+                if term_last < time_machine_now(self.real_now_dt):
                     raise CartError(error_messages['payment_ended'])
 
     def _extend_expiry_of_valid_existing_positions(self):
         # Extend this user's cart session to ensure all items in the cart expire at the same time
         # We can extend the reservation of items which are not yet expired without risk
-        self.positions.filter(expires__gt=self.now_dt).update(expires=self._expiry)
+        self.positions.filter(expires__gt=self.real_now_dt).update(expires=self._expiry)
 
     def _delete_out_of_timeframe(self):
         err = None
@@ -333,15 +339,17 @@ class CartManager:
             if not cp.pk:
                 continue
 
-            if cp.subevent and cp.subevent.presale_start and self.now_dt < cp.subevent.presale_start:
+            if cp.subevent and cp.subevent.presale_start and time_machine_now(self.real_now_dt) < cp.subevent.presale_start:
                 err = error_messages['some_subevent_not_started']
                 cp.addons.all().delete()
                 cp.delete()
+                continue
 
-            if cp.subevent and cp.subevent.presale_end and self.now_dt > cp.subevent.presale_end:
+            if cp.subevent and cp.subevent.presale_end and time_machine_now(self.real_now_dt) > cp.subevent.presale_end:
                 err = error_messages['some_subevent_ended']
                 cp.addons.all().delete()
                 cp.delete()
+                continue
 
             if cp.subevent:
                 tlv = self.event.settings.get('payment_term_last', as_type=RelativeDateWrapper)
@@ -350,10 +358,11 @@ class CartManager:
                         tlv.datetime(cp.subevent).date(),
                         time(hour=23, minute=59, second=59)
                     ), self.event.timezone)
-                    if term_last < self.now_dt:
+                    if term_last < time_machine_now(self.real_now_dt):
                         err = error_messages['some_subevent_ended']
                         cp.addons.all().delete()
                         cp.delete()
+                        continue
         return err
 
     def _update_subevents_cache(self, se_ids: List[int]):
@@ -383,7 +392,7 @@ class CartManager:
         })
 
     def _check_max_cart_size(self):
-        if not get_all_sales_channels()[self._sales_channel].unlimited_items_per_order:
+        if not self._sales_channel.type_instance.unlimited_items_per_order:
             cartsize = self.positions.filter(addon_to__isnull=True).count()
             cartsize += sum([op.count for op in self._operations if isinstance(op, self.AddOperation) and not op.addon_to])
             cartsize -= len([1 for op in self._operations if isinstance(op, self.RemoveOperation) if
@@ -421,8 +430,13 @@ class CartManager:
             elif op.item.media_policy == Item.MEDIA_POLICY_REUSE:
                 raise CartError(error_messages['media_usage_not_implemented'])
 
-            if self._sales_channel not in op.item.sales_channels or (op.variation and self._sales_channel not in op.variation.sales_channels):
-                raise CartError(error_messages['unavailable'])
+            if not op.item.all_sales_channels:
+                if self._sales_channel.identifier not in (s.identifier for s in op.item.limit_sales_channels.all()):
+                    raise CartError(error_messages['unavailable'])
+
+            if op.variation and not op.variation.all_sales_channels:
+                if self._sales_channel.identifier not in (s.identifier for s in op.variation.limit_sales_channels.all()):
+                    raise CartError(error_messages['unavailable'])
 
             if op.subevent and op.item.pk in op.subevent.item_overrides and not op.subevent.item_overrides[op.item.pk].is_available():
                 raise CartError(error_messages['not_for_sale'])
@@ -449,14 +463,21 @@ class CartManager:
             if op.subevent and not op.subevent.active:
                 raise CartError(error_messages['inactive_subevent'])
 
-            if op.subevent and op.subevent.presale_start and self.now_dt < op.subevent.presale_start:
+            if op.subevent and op.subevent.presale_start and time_machine_now(self.real_now_dt) < op.subevent.presale_start:
                 raise CartError(error_messages['not_started'])
 
             if op.subevent and op.subevent.presale_has_ended:
                 raise CartError(error_messages['ended'])
 
             seated = self._is_seated(op.item, op.subevent)
-            if seated and (not op.seat or (op.seat.blocked and self._sales_channel not in self.event.settings.seating_allow_blocked_seats_for_channel)):
+            if (
+                seated and (
+                    not op.seat or (
+                        op.seat.blocked and
+                        self._sales_channel.identifier not in self.event.settings.seating_allow_blocked_seats_for_channel
+                    )
+                )
+            ):
                 raise CartError(error_messages['seat_invalid'])
             elif op.seat and not seated:
                 raise CartError(error_messages['seat_forbidden'])
@@ -472,7 +493,7 @@ class CartManager:
                         tlv.datetime(op.subevent).date(),
                         time(hour=23, minute=59, second=59)
                     ), self.event.timezone)
-                    if term_last < self.now_dt:
+                    if term_last < time_machine_now(self.real_now_dt):
                         raise CartError(error_messages['payment_ended'])
 
         if isinstance(op, self.AddOperation):
@@ -509,7 +530,7 @@ class CartManager:
         )
         if not self.event.settings.seating_choice:
             requires_seat = Value(0, output_field=IntegerField())
-        expired = self.positions.filter(expires__lte=self.now_dt).select_related(
+        expired = self.positions.filter(expires__lte=self.real_now_dt).select_related(
             'item', 'variation', 'voucher', 'addon_to', 'addon_to__item'
         ).annotate(
             requires_seat=requires_seat
@@ -690,7 +711,7 @@ class CartManager:
                         # than either of the possible default assumptions.
                         predicted_redeemed_after = (
                             voucher.redeemed +
-                            CartPosition.objects.filter(voucher=voucher, expires__gte=self.now_dt).count() +
+                            CartPosition.objects.filter(voucher=voucher, expires__gte=self.real_now_dt).count() +
                             self._voucher_use_diff[voucher] +
                             voucher_use_diff[voucher]
                         )
@@ -982,7 +1003,7 @@ class CartManager:
                 current_num = len(current_addons[cp].get(k, []))
                 if input_num < current_num:
                     for a in current_addons[cp][k][:current_num - input_num]:
-                        if a.expires > self.now_dt:
+                        if a.expires > self.real_now_dt:
                             quotas = list(a.quotas)
 
                             for quota in quotas:
@@ -996,7 +1017,7 @@ class CartManager:
 
     def _get_voucher_availability(self):
         vouchers_ok, self._voucher_depend_on_cart = _get_voucher_availability(
-            self.event, self._voucher_use_diff, self.now_dt,
+            self.event, self._voucher_use_diff, self.real_now_dt,
             exclude_position_ids=[
                 op.position.id for op in self._operations if isinstance(op, self.ExtendOperation)
             ]
@@ -1101,7 +1122,7 @@ class CartManager:
                 shared_lock_objects=[self.event]
             )
         vouchers_ok = self._get_voucher_availability()
-        quotas_ok = _get_quota_availability(self._quota_diff, self.now_dt)
+        quotas_ok = _get_quota_availability(self._quota_diff, self.real_now_dt)
         err = None
         new_cart_positions = []
         deleted_positions = set()
@@ -1118,7 +1139,7 @@ class CartManager:
 
         for iop, op in enumerate(self._operations):
             if isinstance(op, self.RemoveOperation):
-                if op.position.expires > self.now_dt:
+                if op.position.expires > self.real_now_dt:
                     for q in op.position.quotas:
                         quotas_ok[q] += 1
                 addons = op.position.addons.all()
@@ -1358,7 +1379,7 @@ class CartManager:
         return err
 
     def recompute_final_prices_and_taxes(self):
-        positions = sorted(list(self.positions), key=lambda op: -(op.addon_to_id or 0))
+        positions = sorted(list(self.positions), key=lambda cp: (-(cp.addon_to_id or 0), cp.pk))
         diff = Decimal('0.00')
         for cp in positions:
             if cp.listed_price is None:
@@ -1370,7 +1391,7 @@ class CartManager:
 
         discount_results = apply_discounts(
             self.event,
-            self._sales_channel,
+            self._sales_channel.identifier,
             [
                 (cp.item_id, cp.subevent_id, cp.line_price_gross, bool(cp.addon_to), cp.is_bundled, cp.listed_price - cp.price_after_voucher)
                 for cp in positions
@@ -1395,7 +1416,7 @@ class CartManager:
         err = self.extend_expired_positions() or err
         err = err or self._check_min_per_voucher()
 
-        self.now_dt = now()
+        self.real_now_dt = now()
 
         self._extend_expiry_of_valid_existing_positions()
         err = self._perform_operations() or err
@@ -1403,6 +1424,28 @@ class CartManager:
 
         if err:
             raise CartError(err)
+
+
+def add_payment_to_cart_session(cart_session, provider, min_value: Decimal=None, max_value: Decimal=None, info_data: dict=None):
+    """
+    :param cart_session: The current cart session.
+    :param provider: The instance of your payment provider.
+    :param min_value: The minimum value this payment instrument supports, or ``None`` for unlimited.
+    :param max_value: The maximum value this payment instrument supports, or ``None`` for unlimited. Highly discouraged
+                      to use for payment providers which charge a payment fee, as this can be very user-unfriendly if
+                      users need a second payment method just for the payment fee of the first method.
+    :param info_data: A dictionary of information that will be passed through to the ``OrderPayment.info_data`` attribute.
+    :return:
+    """
+    cart_session.setdefault('payments', [])
+    cart_session['payments'].append({
+        'id': str(uuid.uuid4()),
+        'provider': provider.identifier,
+        'multi_use_supported': provider.multi_use_supported,
+        'min_value': str(min_value) if min_value is not None else None,
+        'max_value': str(max_value) if max_value is not None else None,
+        'info_data': info_data or {},
+    })
 
 
 def add_payment_to_cart(request, provider, min_value: Decimal=None, max_value: Decimal=None, info_data: dict=None):
@@ -1419,16 +1462,7 @@ def add_payment_to_cart(request, provider, min_value: Decimal=None, max_value: D
     from pretix.presale.views.cart import cart_session
 
     cs = cart_session(request)
-    cs.setdefault('payments', [])
-
-    cs['payments'].append({
-        'id': str(uuid.uuid4()),
-        'provider': provider.identifier,
-        'multi_use_supported': provider.multi_use_supported,
-        'min_value': str(min_value) if min_value is not None else None,
-        'max_value': str(max_value) if max_value is not None else None,
-        'info_data': info_data or {},
-    })
+    add_payment_to_cart_session(cs, provider, min_value, max_value, info_data)
 
 
 def get_fees(event, request, total, invoice_address, payments, positions):
@@ -1479,6 +1513,7 @@ def get_fees(event, request, total, invoice_address, payments, positions):
                     value=payment_fee,
                     tax_rate=payment_fee_tax.rate,
                     tax_value=payment_fee_tax.tax,
+                    tax_code=payment_fee_tax.code,
                     tax_rule=payment_fee_tax_rule
                 ))
 
@@ -1487,7 +1522,7 @@ def get_fees(event, request, total, invoice_address, payments, positions):
 
 @app.task(base=ProfiledEventTask, bind=True, max_retries=5, default_retry_delay=1, throws=(CartError,))
 def add_items_to_cart(self, event: int, items: List[dict], cart_id: str=None, locale='en',
-                      invoice_address: int=None, widget_data=None, sales_channel='web') -> None:
+                      invoice_address: int=None, widget_data=None, sales_channel='web', override_now_dt: datetime=None) -> None:
     """
     Adds a list of items to a user's cart.
     :param event: The event ID in question
@@ -1495,7 +1530,7 @@ def add_items_to_cart(self, event: int, items: List[dict], cart_id: str=None, lo
     :param cart_id: Session ID of a guest
     :raises CartError: On any error that occurred
     """
-    with language(locale):
+    with language(locale), time_machine_now_assigned(override_now_dt):
         ia = False
         if invoice_address:
             try:
@@ -1503,6 +1538,11 @@ def add_items_to_cart(self, event: int, items: List[dict], cart_id: str=None, lo
                     ia = InvoiceAddress.objects.get(pk=invoice_address)
             except InvoiceAddress.DoesNotExist:
                 pass
+
+        try:
+            sales_channel = event.organizer.sales_channels.get(identifier=sales_channel)
+        except SalesChannel.DoesNotExist:
+            raise CartError("Invalid sales channel.")
 
         try:
             try:
@@ -1517,14 +1557,17 @@ def add_items_to_cart(self, event: int, items: List[dict], cart_id: str=None, lo
 
 
 @app.task(base=ProfiledEventTask, bind=True, max_retries=5, default_retry_delay=1, throws=(CartError,))
-def apply_voucher(self, event: Event, voucher: str, cart_id: str=None, locale='en', sales_channel='web') -> None:
+def apply_voucher(self, event: Event, voucher: str, cart_id: str=None, locale='en', sales_channel='web', override_now_dt: datetime=None) -> None:
     """
-    Removes a list of items from a user's cart.
     :param event: The event ID in question
     :param voucher: A voucher code
-    :param session: Session ID of a guest
+    :param cart_id: The cart ID of the cart to modify
     """
-    with language(locale):
+    with language(locale), time_machine_now_assigned(override_now_dt):
+        try:
+            sales_channel = event.organizer.sales_channels.get(identifier=sales_channel)
+        except SalesChannel.DoesNotExist:
+            raise CartError("Invalid sales channel.")
         try:
             try:
                 cm = CartManager(event=event, cart_id=cart_id, sales_channel=sales_channel)
@@ -1537,14 +1580,18 @@ def apply_voucher(self, event: Event, voucher: str, cart_id: str=None, locale='e
 
 
 @app.task(base=ProfiledEventTask, bind=True, max_retries=5, default_retry_delay=1, throws=(CartError,))
-def remove_cart_position(self, event: Event, position: int, cart_id: str=None, locale='en', sales_channel='web') -> None:
+def remove_cart_position(self, event: Event, position: int, cart_id: str=None, locale='en', sales_channel='web', override_now_dt: datetime=None) -> None:
     """
-    Removes a list of items from a user's cart.
+    Removes an item specified by its position ID from a user's cart.
     :param event: The event ID in question
     :param position: A cart position ID
-    :param session: Session ID of a guest
+    :param cart_id: The cart ID of the cart to modify
     """
-    with language(locale):
+    with language(locale), time_machine_now_assigned(override_now_dt):
+        try:
+            sales_channel = event.organizer.sales_channels.get(identifier=sales_channel)
+        except SalesChannel.DoesNotExist:
+            raise CartError("Invalid sales channel.")
         try:
             try:
                 cm = CartManager(event=event, cart_id=cart_id, sales_channel=sales_channel)
@@ -1557,13 +1604,17 @@ def remove_cart_position(self, event: Event, position: int, cart_id: str=None, l
 
 
 @app.task(base=ProfiledEventTask, bind=True, max_retries=5, default_retry_delay=1, throws=(CartError,))
-def clear_cart(self, event: Event, cart_id: str=None, locale='en', sales_channel='web') -> None:
+def clear_cart(self, event: Event, cart_id: str=None, locale='en', sales_channel='web', override_now_dt: datetime=None) -> None:
     """
-    Removes a list of items from a user's cart.
+    Removes all items from a user's cart.
     :param event: The event ID in question
-    :param session: Session ID of a guest
+    :param cart_id: The cart ID of the cart to modify
     """
-    with language(locale):
+    with language(locale), time_machine_now_assigned(override_now_dt):
+        try:
+            sales_channel = event.organizer.sales_channels.get(identifier=sales_channel)
+        except SalesChannel.DoesNotExist:
+            raise CartError("Invalid sales channel.")
         try:
             try:
                 cm = CartManager(event=event, cart_id=cart_id, sales_channel=sales_channel)
@@ -1576,15 +1627,17 @@ def clear_cart(self, event: Event, cart_id: str=None, locale='en', sales_channel
 
 
 @app.task(base=ProfiledEventTask, bind=True, max_retries=5, default_retry_delay=1, throws=(CartError,))
-def set_cart_addons(self, event: Event, addons: List[dict], cart_id: str=None, locale='en',
-                    invoice_address: int=None, sales_channel='web') -> None:
+def set_cart_addons(self, event: Event, addons: List[dict], add_to_cart_items: List[dict], cart_id: str=None, locale='en',
+                    invoice_address: int=None, sales_channel='web', override_now_dt: datetime=None) -> None:
     """
-    Removes a list of items from a user's cart.
+    Assigns addons to eligible products in a user's cart, adding and removing the addon products as necessary to
+    ensure the requested addon state.
     :param event: The event ID in question
     :param addons: A list of dicts with the keys addon_to, item, variation
-    :param session: Session ID of a guest
+    :param add_to_cart_items: A list of dicts with the keys item, variation, count, custom_price, voucher, seat ID
+    :param cart_id: The cart ID of the cart to modify
     """
-    with language(locale):
+    with language(locale), time_machine_now_assigned(override_now_dt):
         ia = False
         if invoice_address:
             try:
@@ -1593,9 +1646,14 @@ def set_cart_addons(self, event: Event, addons: List[dict], cart_id: str=None, l
             except InvoiceAddress.DoesNotExist:
                 pass
         try:
+            sales_channel = event.organizer.sales_channels.get(identifier=sales_channel)
+        except SalesChannel.DoesNotExist:
+            raise CartError("Invalid sales channel.")
+        try:
             try:
                 cm = CartManager(event=event, cart_id=cart_id, invoice_address=ia, sales_channel=sales_channel)
                 cm.set_addons(addons)
+                cm.add_new_items(add_to_cart_items)
                 cm.commit()
             except LockTimeoutException:
                 self.retry()

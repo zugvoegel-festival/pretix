@@ -119,6 +119,7 @@ class CheckInListMixin(BaseExporter):
                      choices=[
                          ('name', _('Attendee name')),
                          ('code', _('Order code')),
+                         ('order_datetime', _('Order date')),
                      ] + ([
                          ('name:{}'.format(k), _('Attendee name: {part}').format(part=label))
                          for k, label, w in name_scheme['fields']
@@ -229,6 +230,8 @@ class CheckInListMixin(BaseExporter):
             )
         elif sort == 'code':
             qs = qs.order_by(*o, 'order__code')
+        elif sort == 'order_datetime':
+            qs = qs.order_by(*o, '-order__datetime')
         elif sort.startswith('name:'):
             part = sort[5:]
             qs = qs.annotate(
@@ -279,6 +282,17 @@ class TableTextRotate(Flowable):
         canvas = self.canv
         canvas.rotate(90)
         canvas.drawString(0, -1, self.text)
+
+
+def format_answer_for_export(a):
+    if a.question.type in (Question.TYPE_CHOICE, Question.TYPE_CHOICE_MULTIPLE):
+        return ", ".join(str(o.answer) for o in a.options.all())
+    elif a.question.type in Question.UNLOCALIZED_TYPES:
+        # We do not want to localize Date, Time and Datetime question answers, as those can lead
+        # to difficulties parsing the data (for example 2019-02-01 may become Février, 2019 01 in French).
+        return a.answer
+    else:
+        return str(a)
 
 
 class PDFCheckinList(ReportlabExportMixin, CheckInListMixin, BaseExporter):
@@ -372,6 +386,14 @@ class PDFCheckinList(ReportlabExportMixin, CheckInListMixin, BaseExporter):
             tdata[0].append(p)
 
         qs = self._get_queryset(cl, form_data)
+        qs = qs.prefetch_related(
+            'answers',
+            'answers__options',
+            'answers__question',
+            'addon_to__answers',
+            'addon_to__answers__question',
+            'addon_to__answers__options',
+        )
 
         for op in qs:
             try:
@@ -382,8 +404,11 @@ class PDFCheckinList(ReportlabExportMixin, CheckInListMixin, BaseExporter):
                 iac = ""
 
             name = op.attendee_name or (op.addon_to.attendee_name if op.addon_to else '') or ian
-            if iac:
-                name += "<br/>" + iac
+            company = op.company or (op.addon_to.company if op.addon_to else '') or iac
+            if company:
+                if name:
+                    name += "<br/>"
+                name += company
 
             item = "{} ({})".format(
                 str(op.item) + (" – " + str(op.variation.value) if op.variation else ""),
@@ -396,7 +421,7 @@ class PDFCheckinList(ReportlabExportMixin, CheckInListMixin, BaseExporter):
                 )
             if op.seat:
                 item += '<br/>' + str(op.seat)
-            name = bleach.clean(str(name), tags=['br']).strip().replace('<br>', '<br/>')
+            name = bleach.clean(str(name), tags={'br'}).strip().replace('<br>', '<br/>')
             if op.blocked:
                 name = '<font face="OpenSansBd">[' + _('Blocked') + ']</font> ' + name
             row = [
@@ -405,27 +430,17 @@ class PDFCheckinList(ReportlabExportMixin, CheckInListMixin, BaseExporter):
                 '✘' if op.order.status != Order.STATUS_PAID else '✔',
                 op.order.code,
                 Paragraph(name, self.get_style()),
-                Paragraph(bleach.clean(str(item), tags=['br']).strip().replace('<br>', '<br/>'), self.get_style()),
+                Paragraph(bleach.clean(str(item), tags={'br'}).strip().replace('<br>', '<br/>'), self.get_style()),
             ]
             acache = {}
             if op.addon_to:
                 for a in op.addon_to.answers.all():
-                    # We do not want to localize Date, Time and Datetime question answers, as those can lead
-                    # to difficulties parsing the data (for example 2019-02-01 may become Février, 2019 01 in French).
-                    if a.question.type in Question.UNLOCALIZED_TYPES:
-                        acache[a.question_id] = a.answer
-                    else:
-                        acache[a.question_id] = str(a)
+                    acache[a.question_id] = format_answer_for_export(a)
             for a in op.answers.all():
-                # We do not want to localize Date, Time and Datetime question answers, as those can lead
-                # to difficulties parsing the data (for example 2019-02-01 may become Février, 2019 01 in French).
-                if a.question.type in Question.UNLOCALIZED_TYPES:
-                    acache[a.question_id] = a.answer
-                else:
-                    acache[a.question_id] = str(a)
+                acache[a.question_id] = format_answer_for_export(a)
             for q in questions:
                 txt = acache.get(q.pk, '')
-                txt = bleach.clean(txt, tags=['br']).strip().replace('<br>', '<br/>')
+                txt = bleach.clean(txt, tags={'br'}).strip().replace('<br>', '<br/>')
                 p = Paragraph(txt, self.get_style())
                 while p.wrap(colwidths[len(row)], 5000)[1] > 50 * mm:
                     txt = txt[:len(txt) - 50] + "..."
@@ -487,7 +502,7 @@ class CSVCheckinList(CheckInListMixin, ListExporter):
         if form_data['secrets']:
             headers.append(_('Secret'))
 
-        headers.append(_('E-mail'))
+        headers.append(_('Email'))
         headers.append(_('Phone number'))
 
         if self.event.has_subevents:
@@ -504,6 +519,7 @@ class CSVCheckinList(CheckInListMixin, ListExporter):
         headers.append(_('Order time'))
         headers.append(_('Requires special attention'))
         headers.append(_('Comment'))
+        headers.append(_('Check-in text'))
         headers.append(_('Seat ID'))
         headers.append(_('Seat name'))
         headers.append(_('Seat zone'))
@@ -522,7 +538,12 @@ class CSVCheckinList(CheckInListMixin, ListExporter):
         yield headers
 
         qs = base_qs.prefetch_related(
-            'answers', 'answers__question', 'addon_to__answers', 'addon_to__answers__question'
+            'answers',
+            'answers__options',
+            'answers__question',
+            'addon_to__answers',
+            'addon_to__answers__question',
+            'addon_to__answers__options',
         )
 
         all_ids = list(base_qs.values_list('pk', flat=True))
@@ -594,19 +615,9 @@ class CSVCheckinList(CheckInListMixin, ListExporter):
                 acache = {}
                 if op.addon_to:
                     for a in op.addon_to.answers.all():
-                        # We do not want to localize Date, Time and Datetime question answers, as those can lead
-                        # to difficulties parsing the data (for example 2019-02-01 may become Février, 2019 01 in French).
-                        if a.question.type in Question.UNLOCALIZED_TYPES:
-                            acache[a.question_id] = a.answer
-                        else:
-                            acache[a.question_id] = str(a)
+                        acache[a.question_id] = format_answer_for_export(a)
                 for a in op.answers.all():
-                    # We do not want to localize Date, Time and Datetime question answers, as those can lead
-                    # to difficulties parsing the data (for example 2019-02-01 may become Février, 2019 01 in French).
-                    if a.question.type in Question.UNLOCALIZED_TYPES:
-                        acache[a.question_id] = a.answer
-                    else:
-                        acache[a.question_id] = str(a)
+                    acache[a.question_id] = format_answer_for_export(a)
                 for q in questions:
                     row.append(acache.get(q.pk, ''))
 
@@ -616,6 +627,7 @@ class CSVCheckinList(CheckInListMixin, ListExporter):
                 row.append(op.order.datetime.astimezone(self.event.timezone).strftime('%H:%M:%S'))
                 row.append(_('Yes') if op.require_checkin_attention else _('No'))
                 row.append(op.order.comment or "")
+                row.append("\n".join(text for text in [op.order.checkin_text, op.item.checkin_text] if text))
 
                 if op.seat:
                     row += [

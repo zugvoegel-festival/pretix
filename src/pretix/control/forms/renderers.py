@@ -19,6 +19,7 @@
 # You should have received a copy of the GNU Affero General Public License along with this program.  If not, see
 # <https://www.gnu.org/licenses/>.
 #
+from bootstrap3.renderers import FieldRenderer, InlineFieldRenderer
 from bootstrap3.text import text_value
 from django.forms import CheckboxInput, CheckboxSelectMultiple, RadioSelect
 from django.forms.utils import flatatt
@@ -26,8 +27,6 @@ from django.utils.html import format_html
 from django.utils.safestring import mark_safe
 from django.utils.translation import pgettext
 from i18nfield.forms import I18nFormField
-
-from pretix.base.forms.renderers import FieldRenderer, InlineFieldRenderer
 
 
 def render_label(content, label_for=None, label_class=None, label_title='', label_id='', optional=False):
@@ -98,6 +97,30 @@ class ControlFieldRenderer(FieldRenderer):
         else:
             attrs = ''
         return '<div class="{klass}"{attrs}>{html}</div>'.format(klass=self.get_form_group_class(), html=html, attrs=attrs)
+
+    def wrap_widget(self, html):
+        if isinstance(self.widget, CheckboxInput):
+            css_class = "checkbox"
+            if self.field.field.disabled:
+                css_class += " disabled"
+            html = f'<div class="{css_class}">{html}</div>'
+        return html
+
+
+class ControlFieldWithVisibilityRenderer(ControlFieldRenderer):
+    def __init__(self, *args, **kwargs):
+        kwargs['layout'] = 'horizontal'
+        kwargs['horizontal_field_class'] = 'col-md-7'
+        self.visibility_field = kwargs['visibility_field']
+        super().__init__(*args, **kwargs)
+
+    def render_visibility_field(self):
+        return self.visibility_field.as_widget(attrs=self.visibility_field.field.widget.attrs)
+
+    def wrap_field(self, html):
+        html = super().wrap_field(html)
+        html += '<div class="col-md-2 text-right">' + self.render_visibility_field() + '</div>'
+        return html
 
 
 class BulkEditMixin:

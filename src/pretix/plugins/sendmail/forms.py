@@ -39,30 +39,18 @@ from django.core.exceptions import ValidationError
 from django.urls import reverse
 from django.utils.translation import gettext_lazy as _, pgettext_lazy
 from django_scopes.forms import SafeModelMultipleChoiceField
-from i18nfield.forms import I18nFormField, I18nTextarea, I18nTextInput
+from i18nfield.forms import I18nFormField, I18nTextInput
 
-from pretix.base.email import get_available_placeholders
-from pretix.base.forms import I18nModelForm, PlaceholderValidator
+from pretix.base.forms import I18nMarkdownTextarea, I18nModelForm
 from pretix.base.forms.widgets import (
-    SplitDateTimePickerWidget, TimePickerWidget, format_placeholders_help_text,
+    SplitDateTimePickerWidget, TimePickerWidget,
 )
 from pretix.base.models import CheckinList, Item, Order, SubEvent
 from pretix.control.forms import CachedFileField, SplitDateTimeField
 from pretix.control.forms.widgets import Select2, Select2Multiple
 from pretix.plugins.sendmail.models import Rule
 
-
-class FormPlaceholderMixin:
-    def _set_field_placeholders(self, fn, base_parameters):
-        placeholders = get_available_placeholders(self.event, base_parameters)
-        ht = format_placeholders_help_text(placeholders, self.event)
-        if self.fields[fn].help_text:
-            self.fields[fn].help_text += ' ' + str(ht)
-        else:
-            self.fields[fn].help_text = ht
-        self.fields[fn].validators.append(
-            PlaceholderValidator(['{%s}' % p for p in placeholders.keys()])
-        )
+from pretix.base.services.placeholders import FormPlaceholderMixin  # noqa
 
 
 class BaseMailForm(FormPlaceholderMixin, forms.Form):
@@ -88,11 +76,11 @@ class BaseMailForm(FormPlaceholderMixin, forms.Form):
         )
         self.fields['message'] = I18nFormField(
             label=_('Message'),
-            widget=I18nTextarea, required=True,
+            widget=I18nMarkdownTextarea, required=True,
             locales=event.settings.get('locales'),
         )
-        self._set_field_placeholders('subject', context_parameters)
-        self._set_field_placeholders('message', context_parameters)
+        self._set_field_placeholders('subject', context_parameters, rich=False)
+        self._set_field_placeholders('message', context_parameters, rich=True)
 
 
 class WaitinglistMailForm(BaseMailForm):
@@ -177,7 +165,7 @@ class OrderMailForm(BaseMailForm):
         required=False
     )
     checkin_lists = SafeModelMultipleChoiceField(queryset=CheckinList.objects.none(), required=False)  # overridden later
-    not_checked_in = forms.BooleanField(label=pgettext_lazy('sendmail_form', 'Restrict to recipients without check-in'), required=False)
+    not_checked_in = forms.BooleanField(label=pgettext_lazy('sendmail_form', 'Restrict to recipients without check-in on any list'), required=False)
     subevent = forms.ModelChoiceField(
         SubEvent.objects.none(),
         label=pgettext_lazy('sendmail_form', 'Restrict to a specific event date'),
@@ -236,6 +224,11 @@ class OrderMailForm(BaseMailForm):
                 ('both', _('Both (all order contact addresses and all attendee email addresses)'))
             ]
         self.fields['recipients'].choices = recp_choices
+
+        if not self.event.settings.mail_attach_tickets:
+            self.fields['attach_tickets'].disabled = True
+            self.fields['attach_tickets'].help_text = _("Attachment of tickets is disabled in this event's email "
+                                                        "settings.")
 
         choices = [(e, l) for e, l in Order.STATUS_CHOICE if e != 'n']
         choices.insert(0, ('valid_if_pending', _('payment pending but already confirmed')))
@@ -329,6 +322,7 @@ class RuleForm(FormPlaceholderMixin, I18nModelForm):
             ),
             'send_to': forms.RadioSelect,
             'checked_in_status': forms.RadioSelect,
+            'template': I18nMarkdownTextarea,
         }
 
     def __init__(self, *args, **kwargs):
@@ -387,8 +381,8 @@ class RuleForm(FormPlaceholderMixin, I18nModelForm):
             ]
         )
 
-        self._set_field_placeholders('subject', ['event', 'order'])
-        self._set_field_placeholders('template', ['event', 'order'])
+        self._set_field_placeholders('subject', ['event', 'order', 'event_or_subevent'])
+        self._set_field_placeholders('template', ['event', 'order', 'event_or_subevent'], rich=True)
 
         choices = [(e, l) for e, l in Order.STATUS_CHOICE if e != 'n']
         choices.insert(0, ('n__valid_if_pending', _('payment pending but already confirmed')))

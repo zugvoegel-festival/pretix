@@ -36,6 +36,7 @@ import sys
 from importlib import import_module
 
 from django.conf import settings
+from django.core.cache import cache
 from django.db.models import Q
 from django.urls import Resolver404, get_script_prefix, resolve
 from django.utils.translation import get_language
@@ -46,11 +47,11 @@ from pretix.base.settings import GlobalSettingsObject
 from pretix.control.navigation import (
     get_event_navigation, get_global_navigation, get_organizer_navigation,
 )
-
-from ..helpers.i18n import (
+from pretix.helpers.i18n import (
     get_javascript_format, get_javascript_output_format, get_moment_locale,
 )
-from ..multidomain.urlreverse import get_event_domain
+from pretix.multidomain.urlreverse import get_event_domain
+
 from .signals import html_head, nav_topbar
 
 SessionStore = import_module(settings.SESSION_ENGINE).SessionStore
@@ -106,7 +107,7 @@ def _default_context(request):
         else:
             ctx['complain_testmode_orders'] = False
 
-        if not request.event.live and ctx['has_domain']:
+        if (request.event.testmode or not request.event.live) and ctx['has_domain']:
             child_sess = request.session.get('child_session_{}'.format(request.event.pk))
             s = SessionStore()
             if not child_sess or not s.exists(child_sess):
@@ -114,10 +115,8 @@ def _default_context(request):
                 s.create()
                 ctx['new_session'] = s.session_key
                 request.session['child_session_{}'.format(request.event.pk)] = s.session_key
-                request.session['event_access'] = True
             else:
                 ctx['new_session'] = child_sess
-                request.session['event_access'] = True
 
         if request.GET.get('subevent', ''):
             # Do not use .get() for lazy evaluation
@@ -154,6 +153,8 @@ def _default_context(request):
             ctx['warning_update_available'] = True
         if not gs.settings.update_check_ack and 'runserver' not in sys.argv:
             ctx['warning_update_check_active'] = True
+        if not cache.get('pretix_runperiodic_executed') and not settings.DEBUG:
+            ctx['warning_cronjob'] = True
 
     ctx['ie_deprecation_warning'] = 'MSIE' in request.headers.get('User-Agent', '') or 'Trident/' in request.headers.get('User-Agent', '')
 

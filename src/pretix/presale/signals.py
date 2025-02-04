@@ -78,6 +78,23 @@ of every page in the frontend. You will get the request as the keyword argument
 ``request`` and are expected to return plain HTML.
 
 As with all plugin signals, the ``sender`` keyword argument will contain the event.
+
+**Note:** If PCI DSS compliance is important to you and you keep an inventory according to
+rule 6.4.3 of PCI DSS, all plugins that are not required to load on a payment page should
+not return additional JavaScripts if ``getattr(request, 'pci_dss_payment_page', False)``
+is ``True``.
+"""
+
+seatingframe_html_head = EventPluginSignal()
+"""
+Arguments: ``request``
+
+**Temporary workaround, might be removed again later.**
+This signal allows you to put code inside the HTML ``<head>`` tag
+of the seatingframe page in the frontend. You will get the request as the keyword argument
+``request`` and are expected to return plain HTML.
+
+As with all plugin signals, the ``sender`` keyword argument will contain the event.
 """
 
 html_page_header = EventPluginSignal()
@@ -100,33 +117,11 @@ of every page in the frontend. You will get the request as the keyword argument
 ``request`` and are expected to return plain HTML.
 
 As with all plugin signals, the ``sender`` keyword argument will contain the event.
-"""
 
-sass_preamble = EventPluginSignal()
-"""
-Arguments: ``filename``
-
-This signal allows you to put SASS code at the beginning of the event-specific
-stylesheet. Keep in mind that this will only be called/rebuilt when the user changes
-display settings or pretix gets updated. You will get the filename that is being
-generated (usually "main.scss" or "widget.scss"). This SASS code will be loaded *after*
-setting of user-defined variables like colors and fonts but *before* pretix' SASS
-code.
-
-As with all plugin signals, the ``sender`` keyword argument will contain the event.
-"""
-
-sass_postamble = EventPluginSignal()
-"""
-Arguments: ``filename``
-
-This signal allows you to put SASS code at the end of the event-specific
-stylesheet. Keep in mind that this will only be called/rebuilt when the user changes
-display settings or pretix gets updated. You will get the filename that is being
-generated (usually "main.scss" or "widget.scss"). This SASS code will be loaded *after*
-all of pretix' SASS code.
-
-As with all plugin signals, the ``sender`` keyword argument will contain the event.
+**Note:** If PCI DSS compliance is important to you and you keep an inventory according to
+rule 6.4.3 of PCI DSS, all plugins that are not required to load on a payment page should
+not return additional JavaScripts if ``getattr(request, 'pci_dss_payment_page', False)``
+is ``True``.
 """
 
 footer_link = EventPluginSignal()
@@ -180,6 +175,17 @@ Arguments: ``request``
 
 This signal is sent before an order is created through the pretixpresale frontend. It allows you
 to return a dictionary that will be merged in the meta_info attribute of the order.
+You will receive the request triggering the order creation as the ``request`` keyword argument.
+
+As with all event-plugin signals, the ``sender`` keyword argument will contain the event.
+"""
+
+order_api_meta_from_request = EventPluginSignal()
+"""
+Arguments: ``request``
+
+This signal is sent before an order is created through the pretixpresale frontend. It allows you
+to return a dictionary that will be merged in the api_meta attribute of the order.
 You will receive the request triggering the order creation as the ``request`` keyword argument.
 
 As with all event-plugin signals, the ``sender`` keyword argument will contain the event.

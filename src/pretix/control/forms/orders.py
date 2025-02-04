@@ -47,11 +47,14 @@ from django.utils.translation import (
     gettext_lazy as _, gettext_noop, pgettext_lazy,
 )
 from django_scopes.forms import SafeModelChoiceField
-from i18nfield.forms import I18nFormField, I18nTextarea, I18nTextInput
+from i18nfield.forms import I18nFormField, I18nTextInput
 from i18nfield.strings import LazyI18nString
 
 from pretix.base.email import get_available_placeholders
-from pretix.base.forms import I18nModelForm, PlaceholderValidator
+from pretix.base.forms import (
+    I18nMarkdownTextarea, I18nModelForm, MarkdownTextarea,
+    PlaceholderValidator,
+)
 from pretix.base.forms.questions import WrappedPhoneNumberPrefixWidget
 from pretix.base.forms.widgets import (
     DatePickerWidget, SplitDateTimePickerWidget, format_placeholders_help_text,
@@ -61,6 +64,7 @@ from pretix.base.models import (
     TaxRule,
 )
 from pretix.base.models.event import SubEvent
+from pretix.base.services.placeholders import FormPlaceholderMixin
 from pretix.base.services.pricing import get_price
 from pretix.control.forms import SplitDateTimeField
 from pretix.control.forms.widgets import Select2
@@ -486,7 +490,9 @@ class OrderPositionChangeForm(forms.Form):
     )
     operation_secret = forms.BooleanField(
         required=False,
-        label=_('Generate a new secret')
+        label=_('Generate a new secret'),
+        help_text=_('This affects both the ticket secret (often used as a QR code) as well as the link used to '
+                    'individually access the ticket.')
     )
     operation_cancel = forms.BooleanField(
         required=False,
@@ -605,6 +611,55 @@ class OrderFeeChangeForm(forms.Form):
         change_decimal_field(self.fields['value'], instance.order.event.currency)
 
 
+class OrderFeeAddForm(forms.Form):
+    fee_type = forms.ChoiceField(
+        choices=[("", ""), *OrderFee.FEE_TYPES],
+        help_text=_(
+            "Note that payment fees have a special semantic and might automatically be changed if the "
+            "payment method of the order is changed."
+        )
+    )
+    value = forms.DecimalField(
+        max_digits=13, decimal_places=2,
+        localize=True,
+        label=_('Price'),
+        help_text=_("including all taxes"),
+    )
+    tax_rule = forms.ModelChoiceField(
+        TaxRule.objects.none(),
+        required=False,
+    )
+    description = forms.CharField(required=False)
+
+    def __init__(self, *args, **kwargs):
+        order = kwargs.pop('order')
+        super().__init__(*args, **kwargs)
+        self.fields['tax_rule'].queryset = order.event.tax_rules.all()
+        change_decimal_field(self.fields['value'], order.event.currency)
+
+
+class OrderFeeAddFormset(forms.BaseFormSet):
+    def __init__(self, *args, **kwargs):
+        self.order = kwargs.pop('order', None)
+        super().__init__(*args, **kwargs)
+
+    def _construct_form(self, i, **kwargs):
+        kwargs['order'] = self.order
+        return super()._construct_form(i, **kwargs)
+
+    @property
+    def empty_form(self):
+        form = self.form(
+            auto_id=self.auto_id,
+            prefix=self.add_prefix('__prefix__'),
+            empty_permitted=True,
+            use_required_attribute=False,
+            order=self.order,
+        )
+        self.add_fields(form, None)
+        return form
+
+
 class OrderContactForm(forms.ModelForm):
     regenerate_secrets = forms.BooleanField(required=False, label=_('Invalidate secrets'),
                                             help_text=_('Regenerates the order and ticket secrets. You will '
@@ -698,7 +753,7 @@ class OrderMailForm(forms.Form):
         self.fields['message'] = forms.CharField(
             label=_("Message"),
             required=True,
-            widget=forms.Textarea,
+            widget=MarkdownTextarea,
             initial=order.event.settings.mail_text_order_custom_mail.localize(order.locale),
         )
         self.fields['attach_invoices'].queryset = order.invoices.all()
@@ -715,7 +770,7 @@ class OrderPositionMailForm(OrderMailForm):
         self.fields['message'] = forms.CharField(
             label=_("Message"),
             required=True,
-            widget=forms.Textarea,
+            widget=MarkdownTextarea,
             initial=self.order.event.settings.mail_text_order_custom_mail.localize(self.order.locale),
         )
         self._set_field_placeholders('message', ['event', 'order', 'position'])
@@ -767,7 +822,7 @@ class OrderRefundForm(forms.Form):
         return data
 
 
-class EventCancelForm(forms.Form):
+class EventCancelForm(FormPlaceholderMixin, forms.Form):
     subevent = forms.ModelChoiceField(
         SubEvent.objects.none(),
         label=pgettext_lazy('subevent', 'Date'),
@@ -867,17 +922,6 @@ class EventCancelForm(forms.Form):
     send_waitinglist_subject = forms.CharField()
     send_waitinglist_message = forms.CharField()
 
-    def _set_field_placeholders(self, fn, base_parameters):
-        placeholders = get_available_placeholders(self.event, base_parameters)
-        ht = format_placeholders_help_text(placeholders, self.event)
-        if self.fields[fn].help_text:
-            self.fields[fn].help_text += ' ' + str(ht)
-        else:
-            self.fields[fn].help_text = ht
-        self.fields[fn].validators.append(
-            PlaceholderValidator(['{%s}' % p for p in placeholders.keys()])
-        )
-
     def __init__(self, *args, **kwargs):
         self.event = kwargs.pop('event')
         kwargs.setdefault('initial', {})
@@ -893,7 +937,7 @@ class EventCancelForm(forms.Form):
         )
         self.fields['send_message'] = I18nFormField(
             label=_('Message'),
-            widget=I18nTextarea,
+            widget=I18nMarkdownTextarea,
             required=True,
             widget_kwargs={'attrs': {'data-display-dependency': '#id_send'}},
             locales=self.event.settings.get('locales'),
@@ -920,7 +964,7 @@ class EventCancelForm(forms.Form):
         )
         self.fields['send_waitinglist_message'] = I18nFormField(
             label=_('Message'),
-            widget=I18nTextarea,
+            widget=I18nMarkdownTextarea,
             required=True,
             locales=self.event.settings.get('locales'),
             widget_kwargs={'attrs': {'data-display-dependency': '#id_send_waitinglist'}},

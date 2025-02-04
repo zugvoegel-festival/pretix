@@ -9,11 +9,13 @@ acceptor
 analytics
 anonymize
 anonymized
+Auth
 authenticator
 automatical
 availabilities
 backend
 Bancontact
+BankID
 barcode
 barcodes
 Bcc
@@ -25,6 +27,7 @@ BN
 Bokmål
 Boleto
 Bundles
+Ceuta
 chardet
 chargebacks
 checkboxes
@@ -44,6 +47,8 @@ dekodi
 deliverability
 DSS
 DNS
+EEA
+eInvoices
 EPC
 EPS
 eps
@@ -69,6 +74,7 @@ ics
 iDEAL
 Itaú
 integrations
+intra
 iOS
 ISU
 JSON
@@ -80,9 +86,11 @@ Leaflet
 LLC
 MapQuest
 MariaDB
+Melilla
 Mercado
 MerchantID
 Mifare
+MobilePay
 MOTO
 Multibanco
 Mx
@@ -122,12 +130,14 @@ redemptions
 Referer
 renderer
 renderers
+Revolut
 Sa
 Samplecity
 SAQ
 SCA
 selectable
 SEPA
+silvicultural
 smtp
 Sofort
 SOFORT
@@ -136,6 +146,7 @@ SSL
 SSO
 STARTTLS
 Su
+Swish
 subevent
 substracted
 timeframe
@@ -146,6 +157,7 @@ TOTP
 transactional
 trustable
 Trustly
+TWINT
 txt
 UID
 uncanceled

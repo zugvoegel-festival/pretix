@@ -190,7 +190,9 @@ var form_handlers = function (el) {
         }
         if ($(this).is('[data-max]')) {
             opts["maxDate"] = $(this).attr("data-max");
-            opts["viewDate"] = $(this).attr("data-max");
+            opts["viewDate"] = (opts.minDate &&   // if minDate and maxDate are set, use the one closer to now as viewDate
+                    Math.abs(+new Date(opts.minDate) - new Date()) < Math.abs(+new Date(opts.maxDate) - new Date())
+            ) ? opts.minDate : opts.maxDate;
         }
         if ($(this).is('[data-is-payment-date]'))
             opts["daysOfWeekDisabled"] = JSON.parse($("body").attr("data-payment-weekdays-disabled"));
@@ -296,29 +298,45 @@ var form_handlers = function (el) {
             }
         }
     }).not(".no-contrast").on('changeColor create', function (e) {
+        if (e.type == 'changeColor' && !e.value) {
+            return;
+        }
         var rgb = $(this).colorpicker('color').toRGB();
         var c = contrast([255,255,255], [rgb.r, rgb.g, rgb.b]);
         var mark = 'times';
-        if ($(this).parent().find(".contrast-state").length === 0) {
+        var $icon = $(this).parent().find(".contrast-icon");
+        if ($icon.length === 0 && $(this).parent().find(".contrast-state").length === 0) {
             $(this).parent().append("<div class='help-block contrast-state'></div>");
         }
         var $note = $(this).parent().find(".contrast-state");
         if ($(this).val() === "") {
             $note.remove();
         }
+        var icon, text, cls;
         if (c > 7) {
-            $note.html("<span class='fa fa-fw fa-check-circle'></span>")
-                .append(gettext('Your color has great contrast and is very easy to read!'));
-            $note.addClass("text-success").removeClass("text-warning").removeClass("text-danger");
+            icon = "fa-check-circle";
+            text = gettext('Your color has great contrast and is very easy to read!');
+            cls = "text-success";
         } else if (c > 2.5) {
-            $note.html("<span class='fa fa-fw fa-info-circle'></span>")
-                .append(gettext('Your color has decent contrast and is probably good-enough to read!'));
-            $note.removeClass("text-success").removeClass("text-warning").removeClass("text-danger");
+            icon = "fa-info-circle";
+            text = gettext('Your color has decent contrast and is probably good-enough to read!');
+            cls = "";
         } else {
-            $note.html("<span class='fa fa-fw fa-warning'></span>")
-                .append(gettext('Your color has bad contrast for text on white background, please choose a darker ' +
-                    'shade.'));
-            $note.addClass("text-danger").removeClass("text-success").removeClass("text-warning");
+            icon = "fa-warning";
+            text = gettext('Your color has bad contrast for text on white background, please choose a darker shade.');
+            cls = "text-danger";
+        }
+        if ($icon.length === 0) {
+            $note.html("<span class='fa fa-fw " + icon + "'></span>")
+                .append(text);
+            $note.removeClass("text-success").removeClass("text-danger").addClass(cls);
+        } else {
+            $icon.html("<span class='fa fa-fw " + icon + " " + cls + "'></span>")
+            $icon.attr("title", text);
+            $icon.tooltip('destroy');
+            window.setTimeout(function() {
+                $icon.tooltip({"title": text});
+            }, 250);
         }
     });
 
@@ -360,6 +378,7 @@ var form_handlers = function (el) {
             dependency = findDependency($(this).attr("data-display-dependency"), this),
             update = function (ev) {
                 var enabled = dependency.toArray().some(function(d) {
+                    if (d.disabled) return false;
                     if (d.type === 'checkbox' || d.type === 'radio') {
                         return d.checked;
                     } else if (d.type === 'select-one') {
@@ -379,6 +398,9 @@ var form_handlers = function (el) {
                     enabled = !enabled;
                 }
                 var $toggling = dependent;
+                if (dependent.attr("data-disable-dependent")) {
+                    $toggling.attr('disabled', !enabled).trigger("change");
+                }
                 if (dependent.get(0).tagName.toLowerCase() !== "div") {
                     $toggling = dependent.closest('.form-group');
                 }
@@ -393,8 +415,9 @@ var form_handlers = function (el) {
                 }
             };
         update();
-        dependency.closest('.form-group').find('[name=' + dependency.attr("name") + ']').on("change", update);
-        dependency.closest('.form-group').find('[name=' + dependency.attr("name") + ']').on("dp.change", update);
+        dependency.each(function() {
+            $(this).closest('.form-group').find('[name=' + $(this).attr("name") + ']').on("change dp.change", update);
+        })
     });
 
     el.find("input[data-required-if], select[data-required-if], textarea[data-required-if]").each(function () {
@@ -409,60 +432,6 @@ var form_handlers = function (el) {
         update();
         dependency.closest('.form-group').find('input[name=' + dependency.attr("name") + ']').on("change", update);
         dependency.closest('.form-group').find('input[name=' + dependency.attr("name") + ']').on("dp.change", update);
-    });
-
-    $("input[name$=vat_id][data-countries-with-vat-id]").each(function () {
-        var dependent = $(this),
-            dependency_country = $(this).closest(".panel-body, form").find('select[name$=country]'),
-            dependency_id_is_business_1 = $(this).closest(".panel-body, form").find('input[id$=id_is_business_1]'),
-            update = function (ev) {
-                if (dependency_id_is_business_1.length && !dependency_id_is_business_1.prop("checked")) {
-                    dependent.closest(".form-group").hide();
-                } else if (dependent.attr('data-countries-with-vat-id').split(',').includes(dependency_country.val())) {
-                    dependent.closest(".form-group").show();
-                } else {
-                    dependent.closest(".form-group").hide();
-                }
-            };
-        update();
-        dependency_country.on("change", update);
-        dependency_id_is_business_1.on("change", update);
-    });
-
-    $("select[name$=state]:not([data-static])").each(function () {
-        var dependent = $(this),
-            counter = 0,
-            dependency = $(this).closest(".panel-body, form").find('select[name$=country]'),
-            update = function (ev) {
-                counter++;
-                var curCounter = counter;
-                dependent.prop("disabled", true);
-                dependency.closest(".form-group").find("label").prepend("<span class='fa fa-cog fa-spin'></span> ");
-                $.getJSON('/js_helpers/states/?country=' + dependency.val(), function (data) {
-                    if (counter > curCounter) {
-                        return;  // Lost race
-                    }
-                    dependent.find("option").filter(function (t) {return !!$(this).attr("value")}).remove();
-                    if (data.data.length > 0) {
-                        $.each(data.data, function (k, s) {
-                            dependent.append($("<option>").attr("value", s.code).text(s.name));
-                        });
-                        dependent.closest(".form-group").show();
-                        dependent.prop('required', dependency.prop("required"));
-                    } else {
-                        dependent.closest(".form-group").hide();
-                        dependent.prop("required", false);
-                    }
-                    dependent.prop("disabled", false);
-                    dependency.closest(".form-group").find("label .fa-spin").remove();
-                });
-            };
-        if (dependent.find("option").length === 1) {
-            dependent.closest(".form-group").hide();
-        } else {
-            dependent.prop('required', dependency.prop("required"));
-        }
-        dependency.on("change", update);
     });
 
     el.find("div.scrolling-choice:not(.no-search)").each(function () {
@@ -534,6 +503,16 @@ var form_handlers = function (el) {
         language: $("body").attr("data-select2-locale"),
     });
 
+    el.find('[data-model-select2=json_script]').each(function() {
+        const selectedValue = this.value;
+        this.replaceChildren();
+        $(this).select2({
+            theme: "bootstrap",
+            language: $("body").attr("data-select2-locale"),
+            data: JSON.parse($(this.getAttribute('data-select2-src')).text()),
+        }).val(selectedValue).trigger('change');
+    });
+
     el.find('input[data-typeahead-url]').each(function () {
         var $inp = $(this);
         if ($inp.data("ttTypeahead") || $inp.hasClass("tt-hint")) {
@@ -573,6 +552,7 @@ var form_handlers = function (el) {
     el.find('[data-model-select2=generic]').each(function () {
         var $s = $(this);
         $s.select2({
+            closeOnSelect: !this.hasAttribute('multiple'),
             theme: "bootstrap",
             delay: 100,
             allowClear: !$s.prop("required"),
@@ -612,11 +592,19 @@ var form_handlers = function (el) {
                 }, 50);
             }
         });
+        if ($s[0].hasAttribute("data-close-on-clear")) {
+            $s.on("select2:clear", function () {
+                window.setTimeout(function () {
+                    $s.select2('close');
+                }, 50);
+            });
+        }
     });
 
     el.find('[data-model-select2=event]').each(function () {
         var $s = $(this);
         $s.select2({
+            closeOnSelect: !this.hasAttribute('multiple'),
             theme: "bootstrap",
             delay: 100,
             allowClear: !$s.prop("required"),
@@ -754,8 +742,45 @@ function setup_basics(el) {
         $($(this).attr("data-target")).collapse('show');
     });
     el.find("div.collapsed").removeClass("collapsed").addClass("collapse");
-    el.find(".has-error").each(function () {
-        $(this).closest("div.panel-collapse").collapse("show");
+    el.find(".has-error, .panel-body .alert-danger:not(:has(.has-error))").each(function () {
+        var $this = $(this);
+        var $panel = $this.closest("div.panel-collapse").collapse("show");
+        var alert = el.find(".alert-danger").get(0);
+        if (alert === this) {
+            return;
+        }
+        var label = "";
+        var description = "";
+        var scrollTarget = null;
+        if ($this.hasClass('alert-danger')) {
+            // just a general error messages without a actual errorenous input
+            label = $this.closest('.panel').find('.panel-title').contents().filter(function() { return this.nodeType == Node.TEXT_NODE; }).text()
+            description = $this.text();
+            scrollTarget = $this.closest('.panel').get(0);
+            if (!scrollTarget.id) {
+                scrollTarget.id = "panel_" + $("input", scrollTarget).attr("id");
+            }
+        } else {
+            label = $("label", this).first().contents().filter(function () { return this.nodeType != Node.ELEMENT_NODE || !this.classList.contains("optional") }).text();
+            description = $(".help-block", this).first().text();
+            scrollTarget = $(":input", this).get(0);
+        }
+
+        if (!alert || !scrollTarget) {
+            return;
+        }
+
+        $('<li><a href="#' + scrollTarget.id + '">' + $.trim(label) + '</a> – ' + description + '</li>')
+            .appendTo(alert.querySelector("ul") || $("<ul>").appendTo(alert))
+            .find("a").on("click", function(e) {
+                $panel.collapse("show");
+                var tab = scrollTarget.closest(".tab-pane");
+                if (tab) {
+                    $(".nav-tabs a[href='#" + tab.id + "']").click();
+                }
+                scrollTarget.scrollIntoView();
+                scrollTarget.focus();
+            });
     });
 
     el.find('[data-toggle="tooltip"]').tooltip();

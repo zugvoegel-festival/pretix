@@ -37,9 +37,7 @@ import json
 import operator
 from datetime import timedelta
 from functools import reduce
-from urllib.parse import urlparse
 
-import webauthn
 from django.conf import settings
 from django.contrib.auth.models import (
     AbstractBaseUser, BaseUserManager, PermissionsMixin,
@@ -53,13 +51,13 @@ from django.utils.timezone import now
 from django.utils.translation import gettext_lazy as _
 from django_otp.models import Device
 from django_scopes import scopes_disabled
-from u2flib_server.utils import (
-    pub_key_from_der, websafe_decode, websafe_encode,
-)
+from webauthn.helpers.structs import PublicKeyCredentialDescriptor
 
 from pretix.base.i18n import language
 from pretix.helpers.urls import build_absolute_uri
 
+from ...helpers.countries import FastCountryField
+from ...helpers.u2f import pub_key_from_der, websafe_decode
 from .base import LoggingMixin
 
 
@@ -243,7 +241,7 @@ class User(AbstractBaseUser, PermissionsMixin, LoggingMixin):
     REQUIRED_FIELDS = []
 
     email = models.EmailField(unique=True, db_index=True, null=True, blank=True,
-                              verbose_name=_('E-mail'), max_length=190)
+                              verbose_name=_('Email'), max_length=190)
     fullname = models.CharField(max_length=255, blank=True, null=True,
                                 verbose_name=_('Full name'))
     is_active = models.BooleanField(default=True,
@@ -420,18 +418,22 @@ class User(AbstractBaseUser, PermissionsMixin, LoggingMixin):
         else:
             return set()
 
-    def has_event_permission(self, organizer, event, perm_name=None, request=None) -> bool:
+    def has_event_permission(self, organizer, event, perm_name=None, request=None, session_key=None) -> bool:
         """
         Checks if this user is part of any team that grants access of type ``perm_name``
         to the event ``event``.
 
+        Either ``request`` or ``session_key`` are required to detect staff sessions properly.
+
         :param organizer: The organizer of the event
         :param event: The event to check
         :param perm_name: The permission, e.g. ``can_change_teams``
-        :param request: The current request (optional). Required to detect staff sessions properly.
+        :param request: The current request (optional)
+        :param session_key: The current session key (optional)
         :return: bool
         """
-        if request and self.has_active_staff_session(request.session.session_key):
+        assert not (session_key and request)
+        if (session_key or request) and self.has_active_staff_session(session_key or request.session.session_key):
             return True
         teams = self._get_teams_for_event(organizer, event)
         if teams:
@@ -569,17 +571,36 @@ class User(AbstractBaseUser, PermissionsMixin, LoggingMixin):
 
     def get_session_auth_hash(self):
         """
-        Return an HMAC that needs to
+        Return an HMAC that needs to be the same throughout the session, used e.g. for forced
+        logout after every password change.
+        """
+        return self._get_session_auth_hash(secret=settings.SECRET_KEY)
+
+    def get_session_auth_fallback_hash(self):
+        for fallback_secret in settings.SECRET_KEY_FALLBACKS:
+            yield self._get_session_auth_hash(secret=fallback_secret)
+
+    def _get_session_auth_hash(self, secret):
+        """
         """
         key_salt = "pretix.base.models.User.get_session_auth_hash"
         payload = self.password
         payload += self.email
         payload += self.session_token
-        return salted_hmac(key_salt, payload).hexdigest()
+        return salted_hmac(key_salt, payload, secret=secret).hexdigest()
 
     def update_session_token(self):
         self.session_token = generate_session_token()
         self.save(update_fields=['session_token'])
+
+
+class UserKnownLoginSource(models.Model):
+    user = models.ForeignKey('User', on_delete=models.CASCADE, related_name="known_login_sources")
+    agent_type = models.CharField(max_length=255, null=True, blank=True)
+    device_type = models.CharField(max_length=255, null=True, blank=True)
+    os_type = models.CharField(max_length=255, null=True, blank=True)
+    country = FastCountryField(null=True, blank=True)
+    last_seen = models.DateTimeField()
 
 
 class StaffSession(models.Model):
@@ -608,7 +629,12 @@ class U2FDevice(Device):
     json_data = models.TextField()
 
     @property
-    def webauthnuser(self):
+    def webauthndevice(self):
+        d = json.loads(self.json_data)
+        return PublicKeyCredentialDescriptor(websafe_decode(d['keyHandle']))
+
+    @property
+    def webauthnpubkey(self):
         d = json.loads(self.json_data)
         # We manually need to convert the pubkey from DER format (used in our
         # former U2F implementation) to the format required by webauthn. This
@@ -620,16 +646,7 @@ class U2FDevice(Device):
                 pub_key.public_numbers().x, pub_key.public_numbers().y
             )
         )
-        return webauthn.WebAuthnUser(
-            d['keyHandle'],
-            self.user.email,
-            str(self.user),
-            settings.SITE_URL,
-            d['keyHandle'],
-            websafe_encode(pub_key),
-            1,
-            urlparse(settings.SITE_URL).netloc
-        )
+        return pub_key
 
 
 class WebAuthnDevice(Device):
@@ -641,14 +658,15 @@ class WebAuthnDevice(Device):
     sign_count = models.IntegerField(default=0)
 
     @property
-    def webauthnuser(self):
-        return webauthn.WebAuthnUser(
-            self.ukey,
-            self.user.email,
-            str(self.user),
-            settings.SITE_URL,
-            self.credential_id,
-            self.pub_key,
-            self.sign_count,
-            urlparse(settings.SITE_URL).netloc
-        )
+    def webauthndevice(self):
+        return PublicKeyCredentialDescriptor(websafe_decode(self.credential_id))
+
+    @property
+    def webauthnpubkey(self):
+        return websafe_decode(self.pub_key)
+
+
+class HistoricPassword(models.Model):
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="historic_passwords")
+    created = models.DateTimeField(auto_now_add=True)
+    password = models.CharField(verbose_name=_("Password"), max_length=128)

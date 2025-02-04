@@ -62,6 +62,7 @@ from django.http import (
 from django.shortcuts import get_object_or_404, redirect
 from django.urls import reverse
 from django.utils.functional import cached_property
+from django.utils.html import conditional_escape
 from django.utils.http import url_has_allowed_host_and_scheme
 from django.utils.timezone import now
 from django.utils.translation import gettext, gettext_lazy as _, gettext_noop
@@ -71,8 +72,8 @@ from django.views.generic.detail import SingleObjectMixin
 from i18nfield.strings import LazyI18nString
 from i18nfield.utils import I18nJSONEncoder
 
-from pretix.base.channels import get_all_sales_channels
 from pretix.base.email import get_available_placeholders
+from pretix.base.forms import PlaceholderValidator
 from pretix.base.models import Event, LogEntry, Order, TaxRule, Voucher
 from pretix.base.models.event import EventMetaValue
 from pretix.base.services import tickets
@@ -93,15 +94,18 @@ from pretix.control.views.user import RecentAuthenticationRequiredMixin
 from pretix.helpers.database import rolledback_transaction
 from pretix.multidomain.urlreverse import build_absolute_uri, get_event_domain
 from pretix.plugins.stripe.payment import StripeSettingsHolder
-from pretix.presale.style import regenerate_css
 
 from ...base.i18n import language
 from ...base.models.items import (
     Item, ItemCategory, ItemMetaProperty, Question, Quota,
 )
-from ...base.settings import SETTINGS_AFFECTING_CSS, LazyI18nStringList
+from ...base.services.mail import prefix_subject
+from ...base.services.placeholders import get_sample_context
+from ...base.settings import LazyI18nStringList
 from ...helpers.compat import CompatDeleteView
-from ...helpers.format import format_map
+from ...helpers.format import (
+    PlainHtmlAlternativeString, SafeFormatter, format_map,
+)
 from ..logdisplay import OVERVIEW_BANLIST
 from . import CreateView, PaginationMixin, UpdateView
 
@@ -201,19 +205,17 @@ class EventUpdate(DecoupleMixin, EventSettingsViewMixin, EventPermissionRequired
     def form_valid(self, form):
         self._save_decoupled(self.sform)
         self.sform.save()
+        self.object.cache.clear()
         self.save_meta()
         self.save_item_meta_property_formset(self.object)
         self.save_confirm_texts_formset(self.object)
         self.save_footer_links_formset(self.object)
-        change_css = False
 
         if self.sform.has_changed() or self.confirm_texts_formset.has_changed():
             data = {k: self.request.event.settings.get(k) for k in self.sform.changed_data}
             if self.confirm_texts_formset.has_changed():
                 data.update(confirm_texts=self.confirm_texts_formset.cleaned_data)
             self.request.event.log_action('pretix.event.settings', user=self.request.user, data=data)
-            if any(p in self.sform.changed_data for p in SETTINGS_AFFECTING_CSS):
-                change_css = True
         if self.footer_links_formset.has_changed():
             self.request.event.log_action('pretix.event.footerlinks.changed', user=self.request.user, data={
                 'data': self.footer_links_formset.cleaned_data
@@ -227,13 +229,7 @@ class EventUpdate(DecoupleMixin, EventSettingsViewMixin, EventPermissionRequired
             })
 
         tickets.invalidate_cache.apply_async(kwargs={'event': self.request.event.pk})
-        if change_css:
-            regenerate_css.apply_async(args=(self.request.event.pk,))
-            messages.success(self.request, _('Your changes have been saved. Please note that it can '
-                                             'take a short period of time until your changes become '
-                                             'active.'))
-        else:
-            messages.success(self.request, _('Your changes have been saved.'))
+        messages.success(self.request, _('Your changes have been saved.'))
         return super().form_valid(form)
 
     def get_success_url(self) -> str:
@@ -246,7 +242,6 @@ class EventUpdate(DecoupleMixin, EventSettingsViewMixin, EventPermissionRequired
         kwargs = super().get_form_kwargs()
         if self.request.user.has_active_staff_session(self.request.session.session_key):
             kwargs['change_slug'] = True
-            kwargs['domain'] = True
         return kwargs
 
     def post(self, request, *args, **kwargs):
@@ -409,7 +404,7 @@ class EventPlugins(EventSettingsViewMixin, EventPermissionRequiredMixin, Templat
                 if key.startswith("plugin:"):
                     module = key.split(":")[1]
                     if value == "enable" and module in plugins_available:
-                        if getattr(plugins_available[module].app, 'restricted', False):
+                        if getattr(plugins_available[module], 'restricted', False):
                             if module not in request.event.settings.allowed_restricted_plugins:
                                 continue
 
@@ -496,8 +491,11 @@ class PaymentProviderSettings(EventSettingsViewMixin, EventPermissionRequiredMix
         if self.form.is_valid():
             if self.form.has_changed():
                 self.request.event.log_action(
-                    'pretix.event.payment.provider.' + self.provider.identifier, user=self.request.user, data={
-                        k: self.form.cleaned_data.get(k) for k in self.form.changed_data
+                    'pretix.event.payment.provider', user=self.request.user, data={
+                        'provider': self.provider.identifier,
+                        'new_values': {
+                            k: self.form.cleaned_data.get(k) for k in self.form.changed_data
+                        }
                     }
                 )
                 self.form.save()
@@ -567,7 +565,7 @@ class PaymentSettings(EventSettingsViewMixin, EventSettingsFormView):
             key=lambda s: s.verbose_name
         )
 
-        sales_channels = get_all_sales_channels()
+        sales_channels = {s.identifier: s for s in self.request.organizer.sales_channels.all()}
         for p in context['providers']:
             p.show_enabled = p.is_enabled
             p.sales_channels = [sales_channels[channel] for channel in p.settings.get('_restrict_to_sales_channels', as_type=list, default=['web'])]
@@ -713,11 +711,6 @@ class MailSettingsSetup(EventPermissionRequiredMixin, MailSettingsSetupView):
 class MailSettingsPreview(EventPermissionRequiredMixin, View):
     permission = 'can_change_event_settings'
 
-    # return the origin text if key is missing in dict
-    class SafeDict(dict):
-        def __missing__(self, key):
-            return '{' + key + '}'
-
     # create index-language mapping
     @cached_property
     def supported_locale(self):
@@ -729,20 +722,7 @@ class MailSettingsPreview(EventPermissionRequiredMixin, View):
 
     # get all supported placeholders with dummy values
     def placeholders(self, item):
-        ctx = {}
-        for p in get_available_placeholders(self.request.event, MailSettingsForm.base_context[item]).values():
-            s = str(p.render_sample(self.request.event))
-            if s.strip().startswith('* '):
-                ctx[p.identifier] = '<div class="placeholder" title="{}">{}</div>'.format(
-                    _('This value will be replaced based on dynamic parameters.'),
-                    markdown_compile_email(s)
-                )
-            else:
-                ctx[p.identifier] = '<span class="placeholder" title="{}">{}</span>'.format(
-                    _('This value will be replaced based on dynamic parameters.'),
-                    s
-                )
-        return self.SafeDict(ctx)
+        return get_sample_context(self.request.event, MailSettingsForm.base_context[item])
 
     def post(self, request, *args, **kwargs):
         preview_item = request.POST.get('item', '')
@@ -758,12 +738,27 @@ class MailSettingsPreview(EventPermissionRequiredMixin, View):
                 idx = matched.group('idx')
                 if idx in self.supported_locale:
                     with language(self.supported_locale[idx], self.request.event.settings.region):
-                        if k.startswith('mail_subject_'):
-                            msgs[self.supported_locale[idx]] = format_map(bleach.clean(v), self.placeholders(preview_item))
-                        else:
-                            msgs[self.supported_locale[idx]] = markdown_compile_email(
-                                format_map(v, self.placeholders(preview_item))
-                            )
+                        try:
+                            if k.startswith('mail_subject_'):
+                                msgs[self.supported_locale[idx]] = prefix_subject(self.request.event, format_map(
+                                    bleach.clean(v), self.placeholders(preview_item), raise_on_missing=True
+                                ), highlight=True)
+                            else:
+                                placeholders = self.placeholders(preview_item)
+                                msgs[self.supported_locale[idx]] = format_map(
+                                    markdown_compile_email(
+                                        format_map(v, placeholders, raise_on_missing=True)
+                                    ),
+                                    placeholders,
+                                    mode=SafeFormatter.MODE_RICH_TO_HTML,
+                                )
+
+                        except ValueError:
+                            msgs[self.supported_locale[idx]] = '<div class="alert alert-danger">{}</div>'.format(
+                                PlaceholderValidator.error_message)
+                        except KeyError as e:
+                            msgs[self.supported_locale[idx]] = '<div class="alert alert-danger">{}</div>'.format(
+                                _('Invalid placeholder: {%(value)s}') % {'value': e.args[0]})
 
         return JsonResponse({
             'item': preview_item,
@@ -780,18 +775,26 @@ class MailSettingsRendererPreview(MailSettingsPreview):
     # get all supported placeholders with dummy values
     def placeholders(self, item):
         ctx = {}
-        for p in get_available_placeholders(self.request.event, MailSettingsForm.base_context[item]).values():
-            ctx[p.identifier] = str(p.render_sample(self.request.event))
+        for p in get_available_placeholders(self.request.event, MailSettingsForm.base_context[item], rich=True).values():
+            sample = p.render_sample(self.request.event)
+            if isinstance(sample, PlainHtmlAlternativeString):
+                ctx[p.identifier] = sample
+            else:
+                ctx[p.identifier] = conditional_escape(sample)
         return ctx
 
     def get(self, request, *args, **kwargs):
         v = str(request.event.settings.mail_text_order_placed)
-        v = format_map(v, self.placeholders('mail_text_order_placed'))
+        context = self.placeholders('mail_text_order_placed')
+        v = format_map(v, context)
         renderers = request.event.get_html_mail_renderers()
         if request.GET.get('renderer') in renderers:
             with rolledback_transaction():
-                order = request.event.orders.create(status=Order.STATUS_PENDING, datetime=now(),
-                                                    expires=now(), code="PREVIEW", total=119)
+                order = request.event.orders.create(
+                    status=Order.STATUS_PENDING, datetime=now(),
+                    expires=now(), code="PREVIEW", total=119,
+                    sales_channel=request.organizer.sales_channels.get(identifier="web")
+                )
                 item = request.event.items.create(name=gettext("Sample product"), default_price=42.23,
                                                   description=gettext("Sample product description"))
                 order.positions.create(item=item, attendee_name_parts={'_legacy': gettext("John Doe")},
@@ -801,13 +804,14 @@ class MailSettingsRendererPreview(MailSettingsPreview):
                     str(request.event.settings.mail_text_signature),
                     gettext('Your order: %(code)s') % {'code': order.code},
                     order,
-                    position=None
+                    position=None,
+                    context=context,
                 )
                 r = HttpResponse(v, content_type='text/html')
                 r._csp_ignore = True
                 return r
         else:
-            raise Http404(_('Unknown e-mail renderer.'))
+            raise Http404(_('Unknown email renderer.'))
 
 
 class TicketSettingsPreview(EventPermissionRequiredMixin, View):
@@ -887,11 +891,14 @@ class TicketSettings(EventSettingsViewMixin, EventPermissionRequiredMixin, FormV
                 provider.form.save()
                 if provider.form.has_changed():
                     self.request.event.log_action(
-                        'pretix.event.tickets.provider.' + provider.identifier, user=self.request.user, data={
-                            k: (provider.form.cleaned_data.get(k).name
-                                if isinstance(provider.form.cleaned_data.get(k), File)
-                                else provider.form.cleaned_data.get(k))
-                            for k in provider.form.changed_data
+                        'pretix.event.tickets.provider', user=self.request.user, data={
+                            'provider': provider.identifier,
+                            'new_values': {
+                                k: (provider.form.cleaned_data.get(k).name
+                                    if isinstance(provider.form.cleaned_data.get(k), File)
+                                    else provider.form.cleaned_data.get(k))
+                                for k in provider.form.changed_data
+                            }
                         }
                     )
                     tickets.invalidate_cache.apply_async(kwargs={'event': self.request.event.pk, 'provider': provider.identifier})
@@ -1015,6 +1022,11 @@ class EventLive(EventPermissionRequiredMixin, TemplateView):
             'organizer': self.request.event.organizer.slug,
             'event': self.request.event.slug
         })
+
+
+class EventTransferSession(EventPermissionRequiredMixin, TemplateView):
+    permission = 'can_change_event_settings'
+    template_name = 'pretixcontrol/event/transfer_session.html'
 
 
 class EventDelete(RecentAuthenticationRequiredMixin, EventPermissionRequiredMixin, FormView):
@@ -1191,17 +1203,22 @@ class TaxCreate(EventSettingsViewMixin, EventPermissionRequiredMixin, CreateView
 
     def post(self, request, *args, **kwargs):
         self.object = None
-        form = self.get_form()
+        form = self.form
         if form.is_valid() and self.formset.is_valid():
             return self.form_valid(form)
         else:
             return self.form_invalid(form)
 
     @cached_property
+    def form(self):
+        return self.get_form()
+
+    @cached_property
     def formset(self):
         return TaxRuleLineFormSet(
             data=self.request.POST if self.request.method == "POST" else None,
             event=self.request.event,
+            parent_form=self.form,
         )
 
     def get_context_data(self, **kwargs):
@@ -1242,17 +1259,22 @@ class TaxUpdate(EventSettingsViewMixin, EventPermissionRequiredMixin, UpdateView
 
     def post(self, request, *args, **kwargs):
         self.object = self.get_object(self.get_queryset())
-        form = self.get_form()
+        form = self.form
         if form.is_valid() and self.formset.is_valid():
             return self.form_valid(form)
         else:
             return self.form_invalid(form)
 
     @cached_property
+    def form(self):
+        return self.get_form()
+
+    @cached_property
     def formset(self):
         return TaxRuleLineFormSet(
             data=self.request.POST if self.request.method == "POST" else None,
             event=self.request.event,
+            parent_form=self.form,
             initial=json.loads(self.object.custom_rules) if self.object.custom_rules else []
         )
 
@@ -1467,7 +1489,7 @@ class QuickSetupView(FormView):
                 admission=True,
                 personalized=True,
                 position=i,
-                sales_channels=list(get_all_sales_channels().keys())
+                all_sales_channels=True,
             )
             item.log_action('pretix.event.item.added', user=self.request.user, data=dict(f.cleaned_data))
             if f.cleaned_data['quota'] or not form.cleaned_data['total_quota']:

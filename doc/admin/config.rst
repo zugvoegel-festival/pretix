@@ -52,9 +52,17 @@ Example::
 ``currency``
     The default currency as a three-letter code. Defaults to ``EUR``.
 
+``cachedir``
+    The local path to a directory where temporary files will be stored.
+    Defaults to the ``cache`` directory below the ``datadir``.
+
 ``datadir``
     The local path to a data directory that will be used for storing user uploads and similar
     data. Defaults to the value of the environment variable ``DATA_DIR`` or ``data``.
+
+``logdir``
+    The local path to a directory where log files will be stored.
+    Defaults to the ``logs`` directory below the ``datadir``.
 
 ``plugins_default``
     A comma-separated list of plugins that are enabled by default for all new events.
@@ -89,8 +97,9 @@ Example::
     Defaults to ``off``.
 
 ``obligatory_2fa``
-    Enables or disables obligatory usage of Two-Factor Authentication for users of the pretix backend.
-    Defaults to ``False``
+    Enables or disables obligatory usage of two-factor authentication for users of the pretix backend.
+    Can be ``True`` to make two-factor authentication obligatory for all users or ``staff`` to make it only
+    obligatory to users with admin permissions. Defaults to ``False``.
 
 ``trust_x_forwarded_for``
     Specifies whether the ``X-Forwarded-For`` header can be trusted. Only set to ``on`` if you have a reverse
@@ -149,6 +158,7 @@ Example::
     host=localhost
     port=3306
     advisory_lock_index=1
+    disable_server_side_cursors=0
     sslmode=require
     sslrootcert=/etc/pretix/postgresql-ca.crt
     sslcert=/etc/pretix/postgresql-client-crt.crt
@@ -168,6 +178,11 @@ Example::
     On PostgreSQL, pretix uses the "advisory lock" feature. However, advisory locks use a server-wide name space and
     and are not scoped to a specific database. If you run multiple pretix applications with the same PostgreSQL server,
     you should set separate values for this setting (integers up to 256).
+
+``disable_server_side_cursors``
+    On PostgreSQL pretix might use server side cursors for certain operations. This is generally fine but will break in
+    specific circumstances, for example when connecting to PostgreSQL through a PGBouncer configured with a transaction
+    pool mode. Off by default (i.e. by default server side cursors will be used).
 
 ``sslmode``, ``sslrootcert``
     Connection TLS details for the PostgreSQL database connection. Possible values of ``sslmode`` are ``disable``, ``allow``, ``prefer``, ``require``, ``verify-ca``, and ``verify-full``. ``sslrootcert`` should be the accessible path of the ca certificate. Both values are empty by default.
@@ -273,16 +288,25 @@ Example::
     [django]
     secret=j1kjps5a5&4ilpn912s7a1!e2h!duz^i3&idu@_907s$wrz@x-
     debug=off
+    passwords_argon2=on
 
 ``secret``
     The secret to be used by Django for signing and verification purposes. If this
     setting is not provided, pretix will generate a random secret on the first start
     and will store it in the filesystem for later usage.
 
+``secret_fallback0`` ... ``secret_fallback9``
+    Prior versions of the secret to be used by Django for signing and verification purposes that will still
+    be accepted but no longer be used for new signing.
+
 ``debug``
     Whether or not to run in debug mode. Default is ``False``.
 
     .. WARNING:: Never set this to ``True`` in production!
+
+``passwords_argon``
+    Use the ``argon2`` algorithm for password hashing. Disable on systems with a small number of CPU cores (currently
+    less than 8).
 
 ``profile``
     Enable code profiling for a random subset of requests. Disabled by default, see
@@ -345,7 +369,7 @@ to speed up various operations::
     The location of redis, as a URL of the form ``redis://[:password]@localhost:6379/0``
     or ``unix://[:password]@/path/to/socket.sock?db=0``
 
-``session``
+``sessions``
     When this is set to ``True``, redis will be used as the session storage.
 
 ``sentinels``

@@ -91,6 +91,7 @@ class BaseOrdersTest(TestCase):
             datetime=now() - datetime.timedelta(days=3),
             expires=now() + datetime.timedelta(days=11),
             total=Decimal("23"),
+            sales_channel=self.orga.sales_channels.get(identifier="web"),
             locale='en'
         )
         self.ticket_pos = OrderPosition.objects.create(
@@ -114,7 +115,8 @@ class BaseOrdersTest(TestCase):
             email='user@localhost',
             datetime=now() - datetime.timedelta(days=3),
             expires=now() + datetime.timedelta(days=11),
-            total=Decimal("23")
+            total=Decimal("23"),
+            sales_channel=self.orga.sales_channels.get(identifier="web"),
         )
 
 
@@ -191,6 +193,24 @@ class OrdersTest(BaseOrdersTest):
                                          self.deleted_pos.positionid, self.deleted_pos.web_secret)
         )
         assert response.status_code == 404
+        response = self.client.get(
+            '/%s/%s/ticket/%s/1/123/modify' % (self.orga.slug, self.event.slug, self.not_my_order.code)
+        )
+        assert response.status_code == 404
+        response = self.client.get(
+            '/%s/%s/ticket/%s/%s/%s/modify' % (self.orga.slug, self.event.slug, self.order.code,
+                                               self.deleted_pos.positionid, self.deleted_pos.web_secret)
+        )
+        assert response.status_code == 404
+        response = self.client.get(
+            '/%s/%s/ticket/%s/1/123/change' % (self.orga.slug, self.event.slug, self.not_my_order.code)
+        )
+        assert response.status_code == 404
+        response = self.client.get(
+            '/%s/%s/ticket/%s/%s/%s/change' % (self.orga.slug, self.event.slug, self.order.code,
+                                               self.deleted_pos.positionid, self.deleted_pos.web_secret)
+        )
+        assert response.status_code == 404
 
     def test_orders_confirm_email(self):
         response = self.client.get(
@@ -201,7 +221,7 @@ class OrdersTest(BaseOrdersTest):
         assert not self.order.email_known_to_work
 
         response = self.client.get(
-            '/%s/%s/order/%s/%s/open/%s/' % (self.orga.slug, self.event.slug, self.order.code, self.order.secret, self.order.email_confirm_hash())
+            '/%s/%s/order/%s/%s/open/%s/' % (self.orga.slug, self.event.slug, self.order.code, self.order.secret, self.order.email_confirm_secret())
         )
         assert response.status_code == 302
         self.order.refresh_from_db()
@@ -423,6 +443,49 @@ class OrdersTest(BaseOrdersTest):
                              target_status_code=200)
         with scopes_disabled():
             assert self.order.invoices.count() == 3
+
+    def test_orders_attendee_modify_invalid(self):
+        self.order.status = Order.STATUS_CANCELED
+        self.order.save()
+        self.event.settings.set('allow_modifications', 'attendee')
+        r = self.client.get(
+            '/%s/%s/ticket/%s/%s/%s/modify' % (self.orga.slug, self.event.slug, self.order.code,
+                                               self.ticket_pos.positionid, self.ticket_pos.web_secret)
+        )
+        assert r.status_code == 302
+
+    def test_orders_attendee_modify_forbidden(self):
+        self.event.settings.set('allow_modifications', 'order')
+        r = self.client.get(
+            '/%s/%s/ticket/%s/%s/%s/modify' % (self.orga.slug, self.event.slug, self.order.code,
+                                               self.ticket_pos.positionid, self.ticket_pos.web_secret)
+        )
+        assert r.status_code == 302
+
+    def test_orders_attendee_modify_attendee_optional(self):
+        self.event.settings.set('allow_modifications', 'attendee')
+        self.event.settings.set('attendee_names_asked', True)
+        self.event.settings.set('attendee_names_required', False)
+
+        response = self.client.get(
+            '/%s/%s/ticket/%s/%s/%s/modify' % (self.orga.slug, self.event.slug, self.order.code,
+                                               self.ticket_pos.positionid, self.ticket_pos.web_secret)
+        )
+        doc = BeautifulSoup(response.content.decode(), "lxml")
+        self.assertEqual(len(doc.select('input[name="%s-attendee_name_parts_0"]' % self.ticket_pos.id)), 1)
+
+        # Not all fields filled out, expect success
+        response = self.client.post(
+            '/%s/%s/ticket/%s/%s/%s/modify' % (self.orga.slug, self.event.slug, self.order.code,
+                                               self.ticket_pos.positionid, self.ticket_pos.web_secret)
+        )
+        self.assertRedirects(response,
+                             '/%s/%s/ticket/%s/%s/%s/' % (self.orga.slug, self.event.slug, self.order.code,
+                                                          self.ticket_pos.positionid, self.ticket_pos.web_secret),
+                             target_status_code=200)
+        with scopes_disabled():
+            self.ticket_pos = OrderPosition.objects.get(id=self.ticket_pos.id)
+        assert self.ticket_pos.attendee_name in (None, '')
 
     def test_orders_cancel_invalid(self):
         self.order.status = Order.STATUS_PAID
@@ -810,6 +873,21 @@ class OrdersTest(BaseOrdersTest):
             '/%s/%s/order/%s/%s/invoice' % (self.orga.slug, self.event.slug, self.order.code, self.order.secret),
             {}, follow=True)
         assert 'alert-danger' in response.content.decode()
+
+    def test_invoice_create_onlypaid(self):
+        self.event.settings.set('invoice_generate', 'user_paid')
+        response = self.client.post(
+            '/%s/%s/order/%s/%s/invoice' % (self.orga.slug, self.event.slug, self.order.code, self.order.secret),
+            {}, follow=True)
+        assert 'alert-danger' in response.content.decode()
+        self.order.status = Order.STATUS_PAID
+        self.order.save()
+        response = self.client.post(
+            '/%s/%s/order/%s/%s/invoice' % (self.orga.slug, self.event.slug, self.order.code, self.order.secret),
+            {}, follow=True)
+        assert 'alert-success' in response.content.decode()
+        with scopes_disabled():
+            assert self.order.invoices.exists()
 
     def test_invoice_create_duplicate(self):
         self.event.settings.set('invoice_generate', 'user')

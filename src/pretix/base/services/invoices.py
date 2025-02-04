@@ -104,10 +104,10 @@ def build_invoice(invoice: Invoice) -> Invoice:
                 expire_date=date_format(invoice.order.expires, "SHORT_DATE_FORMAT")
             )
 
-        invoice.introductory_text = str(introductory).replace('\n', '<br />')
-        invoice.additional_text = str(additional).replace('\n', '<br />')
+        invoice.introductory_text = str(introductory).replace('\n', '<br />').replace('\r', '')
+        invoice.additional_text = str(additional).replace('\n', '<br />').replace('\r', '')
         invoice.footer_text = str(footer)
-        invoice.payment_provider_text = str(payment).replace('\n', '<br />')
+        invoice.payment_provider_text = str(payment).replace('\n', '<br />').replace('\r', '')
         invoice.payment_provider_stamp = str(payment_stamp) if payment_stamp else None
 
         try:
@@ -271,7 +271,9 @@ def build_invoice(invoice: Invoice) -> Invoice:
                 event_date_from=p.subevent.date_from if invoice.event.has_subevents else invoice.event.date_from,
                 event_date_to=p.subevent.date_to if invoice.event.has_subevents else invoice.event.date_to,
                 event_location=location if invoice.event.settings.invoice_event_location else None,
-                tax_rate=p.tax_rate, tax_name=p.tax_rule.name if p.tax_rule else ''
+                tax_rate=p.tax_rate,
+                tax_code=p.tax_code,
+                tax_name=p.tax_rule.name if p.tax_rule else ''
             )
 
             if p.tax_rule and p.tax_rule.is_reverse_charge(ia) and p.price and not p.tax_value:
@@ -305,6 +307,7 @@ def build_invoice(invoice: Invoice) -> Invoice:
                 ),
                 tax_value=fee.tax_value,
                 tax_rate=fee.tax_rate,
+                tax_code=fee.tax_code,
                 tax_name=fee.tax_rule.name if fee.tax_rule else '',
                 fee_type=fee.fee_type,
                 fee_internal_type=fee.internal_type or None,
@@ -420,7 +423,7 @@ def invoice_pdf_task(invoice: int):
 
 def invoice_qualified(order: Order):
     if order.total == Decimal('0.00') or order.require_approval or \
-            order.sales_channel not in order.event.settings.get('invoice_generate_sales_channels'):
+            order.sales_channel.identifier not in order.event.settings.get('invoice_generate_sales_channels'):
         return False
     return True
 
@@ -443,8 +446,11 @@ def build_preview_invoice_pdf(event):
         locale = event.settings.locale
 
     with rolledback_transaction(), language(locale, event.settings.region):
-        order = event.orders.create(status=Order.STATUS_PENDING, datetime=timezone.now(),
-                                    expires=timezone.now(), code="PREVIEW", total=100 * event.tax_rules.count())
+        order = event.orders.create(
+            status=Order.STATUS_PENDING, datetime=timezone.now(),
+            expires=timezone.now(), code="PREVIEW", total=100 * event.tax_rules.count(),
+            sales_channel=event.organizer.sales_channels.get(identifier="web"),
+        )
         invoice = Invoice(
             order=order, event=event, invoice_no="PREVIEW",
             date=timezone.now().date(), locale=locale, organizer=event.organizer
@@ -462,10 +468,10 @@ def build_preview_invoice_pdf(event):
         footer = event.settings.get('invoice_footer_text', as_type=LazyI18nString)
         payment = _("A payment provider specific text might appear here.")
 
-        invoice.introductory_text = str(introductory).replace('\n', '<br />')
-        invoice.additional_text = str(additional).replace('\n', '<br />')
+        invoice.introductory_text = str(introductory).replace('\n', '<br />').replace('\r', '')
+        invoice.additional_text = str(additional).replace('\n', '<br />').replace('\r', '')
         invoice.footer_text = str(footer)
-        invoice.payment_provider_text = str(payment).replace('\n', '<br />')
+        invoice.payment_provider_text = str(payment).replace('\n', '<br />').replace('\r', '')
         invoice.payment_provider_stamp = _('paid')
         invoice.invoice_to_name = _("John Doe")
         invoice.invoice_to_street = _("214th Example Street")
@@ -488,13 +494,19 @@ def build_preview_invoice_pdf(event):
                     InvoiceLine.objects.create(
                         invoice=invoice, description=_("Sample product {}").format(i + 1),
                         gross_value=tax.gross, tax_value=tax.tax,
-                        tax_rate=tax.rate
+                        tax_rate=tax.rate, tax_name=tax.name, tax_code=tax.code,
+                        event_date_from=event.date_from,
+                        event_date_to=event.date_to,
+                        event_location=event.settings.invoice_event_location,
                     )
         else:
             for i in range(5):
                 InvoiceLine.objects.create(
                     invoice=invoice, description=_("Sample product A"),
-                    gross_value=100, tax_value=0, tax_rate=0
+                    gross_value=100, tax_value=0, tax_rate=0, tax_code=None,
+                    event_date_from=event.date_from,
+                    event_date_to=event.date_to,
+                    event_location=event.settings.invoice_event_location,
                 )
 
         return event.invoice_renderer.generate(invoice)

@@ -21,11 +21,12 @@
 #
 from django.dispatch import receiver
 
-from pretix.base.channels import SalesChannel
+from pretix.base.channels import SalesChannelType
 from pretix.base.signals import (
-    register_payment_providers, register_sales_channels,
+    register_payment_providers, register_sales_channel_types,
     register_ticket_outputs,
 )
+from pretix.presale.signals import html_head
 
 
 @receiver(register_ticket_outputs, dispatch_uid="output_dummy")
@@ -43,14 +44,14 @@ def register_payment_provider(sender, **kwargs):
     return [DummyPaymentProvider, DummyFullRefundablePaymentProvider, DummyPartialRefundablePaymentProvider]
 
 
-class FoobazSalesChannel(SalesChannel):
+class FoobazSalesChannel(SalesChannelType):
     identifier = "baz"
     verbose_name = "Foobar"
     icon = "home"
     testmode_supported = False
 
 
-class FoobarSalesChannel(SalesChannel):
+class FoobarSalesChannel(SalesChannelType):
     identifier = "bar"
     verbose_name = "Foobar"
     icon = "home"
@@ -58,6 +59,14 @@ class FoobarSalesChannel(SalesChannel):
     unlimited_items_per_order = True
 
 
-@receiver(register_sales_channels, dispatch_uid="sc_dummy")
+@receiver(register_sales_channel_types, dispatch_uid="sc_dummy")
 def register_sc(sender, **kwargs):
     return [FoobarSalesChannel, FoobazSalesChannel]
+
+
+@receiver(html_head, dispatch_uid="dummy_html_head")
+def html_head_presale(sender, request=None, **kwargs):
+    if getattr(request, 'pci_dss_payment_page', False):
+        # No tracking scripts on PCI DSS relevant payment pages
+        return ""
+    return "<script>alert('BAD TRACKING SCRIPT')</script>"

@@ -32,11 +32,12 @@
 # distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 # License for the specific language governing permissions and limitations under the License.
 
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from django import forms
+from django.conf import settings
 from django.db.models import (
     Case, CharField, Count, DateTimeField, F, IntegerField, Max, Min, OuterRef,
     Q, Subquery, Sum, When,
@@ -54,7 +55,7 @@ from openpyxl.comments import Comment
 from openpyxl.styles import Font, PatternFill
 
 from pretix.base.models import (
-    GiftCard, GiftCardTransaction, Invoice, InvoiceAddress, Order,
+    Checkin, GiftCard, GiftCardTransaction, Invoice, InvoiceAddress, Order,
     OrderPosition, Question,
 )
 from pretix.base.models.orders import (
@@ -209,7 +210,7 @@ class OrderListExporter(MultiSheetListExporter):
             return qs.annotate(**annotations).filter(**filters)
         return qs
 
-    def iterate_orders(self, form_data: dict):
+    def orders_qs(self, form_data):
         p_date = OrderPayment.objects.filter(
             order=OuterRef('pk'),
             state__in=(OrderPayment.PAYMENT_STATE_CONFIRMED, OrderPayment.PAYMENT_STATE_REFUNDED),
@@ -250,11 +251,15 @@ class OrderListExporter(MultiSheetListExporter):
 
         if form_data['paid_only']:
             qs = qs.filter(status=Order.STATUS_PAID)
+        return qs
+
+    def iterate_orders(self, form_data: dict):
+        qs = self.orders_qs(form_data)
         tax_rates = self._get_all_tax_rates(qs)
 
         headers = [
-            _('Event slug'), _('Order code'), _('Order total'), _('Status'), _('Email'), _('Phone number'),
-            _('Order date'), _('Order time'), _('Company'), _('Name'),
+            _('Event slug'), _('Event name'), _('Order code'), _('Order total'), _('Status'), _('Email'),
+            _('Phone number'), _('Order date'), _('Order time'), _('Company'), _('Name'),
         ]
         name_scheme = PERSON_NAME_SCHEMES[self.event.settings.name_scheme] if not self.is_multievent else None
         if name_scheme and len(name_scheme['fields']) > 1:
@@ -279,7 +284,7 @@ class OrderListExporter(MultiSheetListExporter):
         headers.append(_('Comment'))
         headers.append(_('Follow-up date'))
         headers.append(_('Positions'))
-        headers.append(_('E-mail address verified'))
+        headers.append(_('Email address verified'))
         headers.append(_('External customer ID'))
         headers.append(_('Payment providers'))
         if form_data.get('include_payment_amounts'):
@@ -331,6 +336,7 @@ class OrderListExporter(MultiSheetListExporter):
 
             row = [
                 self.event_object_cache[order.event_id].slug,
+                str(self.event_object_cache[order.event_id].name),
                 order.code,
                 order.total,
                 order.get_extended_status_display(),
@@ -406,7 +412,7 @@ class OrderListExporter(MultiSheetListExporter):
             row += self.event_object_cache[order.event_id].meta_data.values()
             yield row
 
-    def iterate_fees(self, form_data: dict):
+    def fees_qs(self, form_data):
         p_providers = OrderPayment.objects.filter(
             order=OuterRef('order'),
             state__in=(OrderPayment.PAYMENT_STATE_CONFIRMED, OrderPayment.PAYMENT_STATE_REFUNDED,
@@ -425,9 +431,14 @@ class OrderListExporter(MultiSheetListExporter):
             qs = qs.filter(order__status=Order.STATUS_PAID, canceled=False)
 
         qs = self._date_filter(qs, form_data, rel='order__')
+        return qs
+
+    def iterate_fees(self, form_data: dict):
+        qs = self.fees_qs(form_data)
 
         headers = [
             _('Event slug'),
+            _('Event name'),
             _('Order code'),
             _('Status'),
             _('Email'),
@@ -464,6 +475,7 @@ class OrderListExporter(MultiSheetListExporter):
             tz = ZoneInfo(order.event.settings.timezone)
             row = [
                 self.event_object_cache[order.event_id].slug,
+                str(self.event_object_cache[order.event_id].name),
                 order.code,
                 _("canceled") if op.canceled else order.get_extended_status_display(),
                 order.email,
@@ -506,7 +518,19 @@ class OrderListExporter(MultiSheetListExporter):
             row += self.event_object_cache[order.event_id].meta_data.values()
             yield row
 
+    def positions_qs(self, form_data: dict):
+        qs = OrderPosition.all.filter(
+            order__event__in=self.events,
+        )
+        if form_data['paid_only']:
+            qs = qs.filter(order__status=Order.STATUS_PAID, canceled=False)
+
+        qs = self._date_filter(qs, form_data, rel='order__')
+        return qs
+
     def iterate_positions(self, form_data: dict):
+        base_qs = self.positions_qs(form_data)
+
         p_providers = OrderPayment.objects.filter(
             order=OuterRef('order'),
             state__in=(OrderPayment.PAYMENT_STATE_CONFIRMED, OrderPayment.PAYMENT_STATE_REFUNDED,
@@ -516,27 +540,37 @@ class OrderListExporter(MultiSheetListExporter):
         ).values(
             'm'
         ).order_by()
-        base_qs = OrderPosition.all.filter(
-            order__event__in=self.events,
-        )
         qs = base_qs.annotate(
             payment_providers=Subquery(p_providers, output_field=CharField()),
+            checked_in_lists=Subquery(
+                Checkin.objects.filter(
+                    successful=True,
+                    type=Checkin.TYPE_ENTRY,
+                    position=OuterRef("pk"),
+                ).order_by().values("position").annotate(
+                    c=GroupConcat(
+                        "list__name",
+                        # These appear not to work properly on SQLite. Well, we don't support SQLite outside testing
+                        # anyways.
+                        ordered='sqlite' not in settings.DATABASES['default']['ENGINE'],
+                        distinct='sqlite' not in settings.DATABASES['default']['ENGINE'],
+                        delimiter=", "
+                    )
+                ).values("c")
+            ),
         ).select_related(
             'order', 'order__invoice_address', 'order__customer', 'item', 'variation',
-            'voucher', 'tax_rule'
+            'voucher', 'tax_rule', 'addon_to',
         ).prefetch_related(
             'subevent', 'subevent__meta_values',
             'answers', 'answers__question', 'answers__options'
         )
-        if form_data['paid_only']:
-            qs = qs.filter(order__status=Order.STATUS_PAID, canceled=False)
-
-        qs = self._date_filter(qs, form_data, rel='order__')
 
         has_subevents = self.events.filter(has_subevents=True).exists()
 
         headers = [
             _('Event slug'),
+            _('Event name'),
             _('Order code'),
             _('Position ID'),
             _('Status'),
@@ -585,13 +619,13 @@ class OrderListExporter(MultiSheetListExporter):
             _('Valid until'),
             _('Order comment'),
             _('Follow-up date'),
+            _('Add-on to position ID'),
         ]
 
         questions = list(Question.objects.filter(event__in=self.events))
-        options = {}
+        options = defaultdict(list)
         for q in questions:
             if q.type == Question.TYPE_CHOICE_MULTIPLE:
-                options[q.pk] = []
                 if form_data['group_multiple_choice']:
                     for o in q.options.all():
                         options[q.pk].append(o)
@@ -601,6 +635,9 @@ class OrderListExporter(MultiSheetListExporter):
                         headers.append(str(q.question) + ' – ' + str(o.answer))
                         options[q.pk].append(o)
             else:
+                if q.type == Question.TYPE_CHOICE:
+                    for o in q.options.all():
+                        options[q.pk].append(o)
                 headers.append(str(q.question))
         headers += [
             _('Company'),
@@ -616,9 +653,11 @@ class OrderListExporter(MultiSheetListExporter):
             _('VAT ID'),
         ]
         headers += [
-            _('Sales channel'), _('Order locale'),
-            _('E-mail address verified'),
+            _('Sales channel'),
+            _('Order locale'),
+            _('Email address verified'),
             _('External customer ID'),
+            _('Check-in lists'),
             _('Payment providers'),
         ]
 
@@ -638,6 +677,7 @@ class OrderListExporter(MultiSheetListExporter):
                 tz = ZoneInfo(self.event_object_cache[order.event_id].settings.timezone)
                 row = [
                     self.event_object_cache[order.event_id].slug,
+                    str(self.event_object_cache[order.event_id].name),
                     order.code,
                     op.positionid,
                     _("canceled") if op.canceled else order.get_extended_status_display(),
@@ -705,11 +745,12 @@ class OrderListExporter(MultiSheetListExporter):
                 ]
                 row.append(order.comment)
                 row.append(order.custom_followup_at.strftime("%Y-%m-%d") if order.custom_followup_at else "")
+                row.append(op.addon_to.positionid if op.addon_to_id else "")
                 acache = {}
                 for a in op.answers.all():
                     # We do not want to localize Date, Time and Datetime question answers, as those can lead
                     # to difficulties parsing the data (for example 2019-02-01 may become Février, 2019 01 in French).
-                    if a.question.type == Question.TYPE_CHOICE_MULTIPLE:
+                    if a.question.type in (Question.TYPE_CHOICE_MULTIPLE, Question.TYPE_CHOICE):
                         acache[a.question_id] = set(o.pk for o in a.options.all())
                     elif a.question.type in Question.UNLOCALIZED_TYPES:
                         acache[a.question_id] = a.answer
@@ -722,6 +763,10 @@ class OrderListExporter(MultiSheetListExporter):
                         else:
                             for o in options[q.pk]:
                                 row.append(_('Yes') if o.pk in acache.get(q.pk, set()) else _('No'))
+                    elif q.type == Question.TYPE_CHOICE:
+                        # Join is only necessary if the question type was modified but also keeps the code simpler here
+                        # as we'd otherwise need some [0] and existance checks
+                        row.append(", ".join(str(o.answer) for o in options[q.pk] if o.pk in acache.get(q.pk, set())))
                     else:
                         row.append(acache.get(q.pk, ''))
 
@@ -752,6 +797,7 @@ class OrderListExporter(MultiSheetListExporter):
                     _('Yes') if order.email_known_to_work else _('No'),
                     str(order.customer.external_identifier) if order.customer and order.customer.external_identifier else '',
                 ]
+                row.append(op.checked_in_lists or "")
                 row.append(', '.join([
                     str(self.providers.get(p, p)) for p in sorted(set((op.payment_providers or '').split(',')))
                     if p and p != 'free'

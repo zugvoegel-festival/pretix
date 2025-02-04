@@ -86,6 +86,7 @@ class InvoiceExporterMixin:
                          ('', _('All payment providers')),
                      ] + [
                          (k, v.verbose_name) for k, v in self.event.get_payment_providers().items()
+                         if not v.is_meta
                      ],
                      required=False,
                      help_text=_('Only include invoices for orders that have at least one payment attempt '
@@ -198,7 +199,7 @@ class InvoiceDataExporter(InvoiceExporterMixin, MultiSheetListExporter):
                 _('Invoice number'),
                 _('Date'),
                 _('Order code'),
-                _('E-mail address'),
+                _('Email address'),
                 _('Invoice type'),
                 _('Cancellation of'),
                 _('Language'),
@@ -325,7 +326,7 @@ class InvoiceDataExporter(InvoiceExporterMixin, MultiSheetListExporter):
                 _('Event start date'),
                 _('Date'),
                 _('Order code'),
-                _('E-mail address'),
+                _('Email address'),
                 _('Invoice type'),
                 _('Cancellation of'),
                 _('Invoice sender:') + ' ' + _('Name'),

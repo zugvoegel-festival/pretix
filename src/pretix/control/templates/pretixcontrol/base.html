@@ -61,6 +61,7 @@
             <script type="text/javascript" src="{% static "fileupload/jquery.fileupload.js" %}"></script>
             <script type="text/javascript" src="{% static "lightbox/js/lightbox.js" %}"></script>
             <script type="text/javascript" src="{% static "are-you-sure/jquery.are-you-sure.js" %}"></script>
+            <script type="text/javascript" src="{% static "pretixbase/js/addressform.js" %}"></script>
 		{% endcompress %}
         {{ html_head|safe }}
 
@@ -327,8 +328,7 @@
                     {% endblocktrans %}
                     {% blocktrans trimmed %}
                         Internet Explorer is an old browser that does not support lots of recent web-based
-                        technologies. While some features might already not work properly, we plan on no longer
-                        supporting Internet Explorer in our administrative backend in the next months.
+                        technologies and is no longer supported by this website.
                     {% endblocktrans %}
                     {% blocktrans trimmed %}
                         We kindly ask you to move to one of our supported browsers, such as Microsoft Edge,
@@ -420,6 +420,14 @@
                                     line with pretix' license.
                                 {% endblocktrans %}
                             </a>
+                        </div>
+                    {% endif %}
+                    {% if warning_cronjob %}
+                        <div class="alert alert-warning">
+                            {% blocktrans trimmed %}
+                                The cronjob component of pretix was not executed in the last hours. Please check that
+                                you have completed all installation steps and your cronjob is executed correctly.
+                            {% endblocktrans %}
                         </div>
                     {% endif %}
 

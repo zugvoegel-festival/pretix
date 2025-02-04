@@ -58,6 +58,7 @@ from django.core.mail import (
 from django.core.mail.message import SafeMIMEText
 from django.db import transaction
 from django.template.loader import get_template
+from django.utils.html import escape
 from django.utils.timezone import now, override
 from django.utils.translation import gettext as _, pgettext
 from django_scopes import scope, scopes_disabled
@@ -75,7 +76,7 @@ from pretix.base.services.tasks import TransactionAwareTask
 from pretix.base.services.tickets import get_tickets_for_order
 from pretix.base.signals import email_filter, global_email_filter
 from pretix.celery_app import app
-from pretix.helpers.format import format_map
+from pretix.helpers.format import SafeFormatter, format_map
 from pretix.helpers.hierarkey import clean_filename
 from pretix.multidomain.urlreverse import build_absolute_uri
 from pretix.presale.ical import get_private_icals
@@ -107,6 +108,22 @@ def clean_sender_name(sender_name: str) -> str:
         sender_name = sender_name[:75] + "..."
 
     return sender_name
+
+
+def prefix_subject(settings_holder, subject, highlight=False):
+    prefix = settings_holder.settings.get('mail_prefix')
+    if prefix and prefix.startswith('[') and prefix.endswith(']'):
+        prefix = prefix[1:-1]
+    if prefix:
+        prefix = f"[{prefix}]"
+        if highlight:
+            prefix = '<span class="placeholder" title="{}">{}</span>'.format(
+                _('This prefix has been set in your event or organizer settings.'),
+                escape(prefix)
+            )
+
+        subject = f"{prefix} {subject}"
+    return subject
 
 
 def mail(email: Union[str, Sequence[str]], subject: str, template: Union[str, LazyI18nString],
@@ -186,10 +203,6 @@ def mail(email: Union[str, Sequence[str]], subject: str, template: Union[str, La
     headers.setdefault('X-Mailer', 'pretix')
 
     with language(locale):
-        if isinstance(context, dict) and event:
-            for k, v in event.meta_data.items():
-                context['meta_' + k] = v
-
         if isinstance(context, dict) and order:
             try:
                 context.update({
@@ -244,11 +257,7 @@ def mail(email: Union[str, Sequence[str]], subject: str, template: Union[str, La
                     and settings_holder.settings.contact_mail and not headers.get('Reply-To'):
                 headers['Reply-To'] = settings_holder.settings.contact_mail
 
-            prefix = settings_holder.settings.get('mail_prefix')
-            if prefix and prefix.startswith('[') and prefix.endswith(']'):
-                prefix = prefix[1:-1]
-            if prefix:
-                subject = "[%s] %s" % (prefix, subject)
+            subject = prefix_subject(settings_holder, subject)
 
             body_plain += "\r\n\r\n-- \r\n"
 
@@ -292,7 +301,7 @@ def mail(email: Union[str, Sequence[str]], subject: str, template: Union[str, La
                         order.event, 'presale:event.order.open', kwargs={
                             'order': order.code,
                             'secret': order.secret,
-                            'hash': order.email_confirm_hash()
+                            'hash': order.email_confirm_secret()
                         }
                     )
                 )
@@ -302,17 +311,25 @@ def mail(email: Union[str, Sequence[str]], subject: str, template: Union[str, La
             try:
                 if plain_text_only:
                     body_html = None
+                elif 'context' in inspect.signature(renderer.render).parameters:
+                    body_html = renderer.render(content_plain, signature, raw_subject, order, position, context)
                 elif 'position' in inspect.signature(renderer.render).parameters:
+                    # Backwards compatibility
+                    warnings.warn('Email renderer called without context argument because context argument is not '
+                                  'supported.',
+                                  DeprecationWarning)
                     body_html = renderer.render(content_plain, signature, raw_subject, order, position)
                 else:
                     # Backwards compatibility
-                    warnings.warn('E-mail renderer called without position argument because position argument is not '
+                    warnings.warn('Email renderer called without position argument because position argument is not '
                                   'supported.',
                                   DeprecationWarning)
                     body_html = renderer.render(content_plain, signature, raw_subject, order)
             except:
                 logger.exception('Could not render HTML body')
                 body_html = None
+
+        body_plain = format_map(body_plain, context, mode=SafeFormatter.MODE_RICH_TO_PLAIN)
 
         send_task = mail_send_task.si(
             to=[email] if isinstance(email, str) else list(email),
@@ -387,6 +404,7 @@ def mail_send_task(self, *args, to: List[str], subject: str, body: str, html: st
     if event:
         with scopes_disabled():
             event = Event.objects.get(id=event)
+            organizer = event.organizer
         backend = event.get_mail_backend()
         cm = lambda: scope(organizer=event.organizer)  # noqa
     elif organizer:
@@ -473,7 +491,8 @@ def mail_send_task(self, *args, to: List[str], subject: str, body: str, html: st
                         # just "ABC-123.pdf", but we only do so if our currently selected language allows to do this
                         # as ASCII text. For example, we would not want a "فاتورة_" prefix for our filename since this
                         # has shown to cause deliverability problems of the email and deliverability wins.
-                        filename = pgettext('invoice', 'Invoice {num}').format(num=inv.number).replace(' ', '_') + '.pdf'
+                        with language(order.locale if order else inv.locale, event.settings.region if event else None):
+                            filename = pgettext('invoice', 'Invoice {num}').format(num=inv.number).replace(' ', '_') + '.pdf'
                         if not re.match("^[a-zA-Z0-9-_%./,&:# ]+$", filename):
                             filename = inv.number.replace(' ', '_') + '.pdf'
                         filename = re.sub("[^a-zA-Z0-9-_.]+", "_", filename)
@@ -644,7 +663,7 @@ def render_mail(template, context):
     if isinstance(template, LazyI18nString):
         body = str(template)
         if context:
-            body = format_map(body, context)
+            body = format_map(body, context, mode=SafeFormatter.MODE_IGNORE_RICH)
     else:
         tpl = get_template(template)
         body = tpl.render(context)

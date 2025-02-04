@@ -29,6 +29,7 @@ from django.utils.translation import gettext_lazy as _
 from rest_framework import serializers
 from rest_framework.exceptions import ValidationError
 
+from pretix.api.auth.devicesecurity import get_all_security_profiles
 from pretix.api.serializers import AsymmetricField
 from pretix.api.serializers.i18n import I18nAwareModelSerializer
 from pretix.api.serializers.order import CompatibleJSONField
@@ -38,7 +39,7 @@ from pretix.base.i18n import get_language_without_region
 from pretix.base.models import (
     Customer, Device, GiftCard, GiftCardAcceptance, GiftCardTransaction,
     Membership, MembershipType, OrderPosition, Organizer, ReusableMedium,
-    SeatingPlan, Team, TeamAPIToken, TeamInvite, User,
+    SalesChannel, SeatingPlan, Team, TeamAPIToken, TeamInvite, User,
 )
 from pretix.base.models.seating import SeatingPlanLayoutValidator
 from pretix.base.services.mail import SendMailException, mail
@@ -79,8 +80,8 @@ class CustomerSerializer(I18nAwareModelSerializer):
 
     class Meta:
         model = Customer
-        fields = ('identifier', 'external_identifier', 'email', 'name', 'name_parts', 'is_active', 'is_verified', 'last_login', 'date_joined',
-                  'locale', 'last_modified', 'notes')
+        fields = ('identifier', 'external_identifier', 'email', 'phone', 'name', 'name_parts', 'is_active',
+                  'is_verified', 'last_login', 'date_joined', 'locale', 'last_modified', 'notes')
 
     def update(self, instance, validated_data):
         if instance and instance.provider_id:
@@ -165,6 +166,36 @@ class FlexibleTicketRelatedField(serializers.PrimaryKeyRelatedField):
         self.fail('incorrect_type', data_type=type(data).__name__)
 
 
+class SalesChannelSerializer(I18nAwareModelSerializer):
+    type = serializers.CharField(default="api")
+
+    class Meta:
+        model = SalesChannel
+        fields = ('identifier', 'type', 'label', 'position')
+
+    def validate_type(self, value):
+        if (not self.instance or not self.instance.pk) and value != "api":
+            raise ValidationError(
+                "You can currently only create channels of type 'api' through the API."
+            )
+        if value and self.instance and self.instance.pk and self.instance.type != value:
+            raise ValidationError(
+                "You cannot change the type of a sales channel."
+            )
+        return value
+
+    def validate_identifier(self, value):
+        if (not self.instance or not self.instance.pk) and not value.startswith("api."):
+            raise ValidationError(
+                "Your identifier needs to start with 'api.'."
+            )
+        if value and self.instance and self.instance.pk and self.instance.identifier != value:
+            raise ValidationError(
+                "You cannot change the identifier of a sales channel."
+            )
+        return value
+
+
 class GiftCardSerializer(I18nAwareModelSerializer):
     value = serializers.DecimalField(max_digits=13, decimal_places=2, min_value=Decimal('0.00'))
     owner_ticket = FlexibleTicketRelatedField(required=False, allow_null=True, queryset=OrderPosition.all.none())
@@ -239,7 +270,7 @@ class TeamSerializer(serializers.ModelSerializer):
     class Meta:
         model = Team
         fields = (
-            'id', 'name', 'all_events', 'limit_events', 'can_create_events', 'can_change_teams',
+            'id', 'name', 'require_2fa', 'all_events', 'limit_events', 'can_create_events', 'can_change_teams',
             'can_change_organizer_settings', 'can_manage_gift_cards', 'can_change_event_settings',
             'can_change_items', 'can_view_orders', 'can_change_orders', 'can_view_vouchers',
             'can_change_vouchers', 'can_checkin_orders', 'can_manage_customers', 'can_manage_reusable_media'
@@ -267,6 +298,7 @@ class DeviceSerializer(serializers.ModelSerializer):
     revoked = serializers.BooleanField(read_only=True)
     initialized = serializers.DateTimeField(read_only=True)
     initialization_token = serializers.DateTimeField(read_only=True)
+    security_profile = serializers.ChoiceField(choices=[], required=False, default="full")
 
     class Meta:
         model = Device
@@ -275,6 +307,10 @@ class DeviceSerializer(serializers.ModelSerializer):
             'revoked', 'name', 'created', 'initialized', 'hardware_brand', 'hardware_model',
             'os_name', 'os_version', 'software_brand', 'software_version', 'security_profile'
         )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields['security_profile'].choices = [(k, v.verbose_name) for k, v in get_all_security_profiles().items()]
 
 
 class TeamInviteSerializer(serializers.ModelSerializer):

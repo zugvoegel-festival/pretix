@@ -65,7 +65,7 @@ Package dependencies
 To build and run pretix, you will need the following debian packages::
 
     # apt-get install git build-essential python3-dev python3-venv python3 python3-pip \
-                      python3-dev libxml2-dev libxslt1-dev libffi-dev zlib1g-dev libssl-dev \
+                      libxml2-dev libxslt1-dev libffi-dev zlib1g-dev libssl-dev \
                       gettext libpq-dev libjpeg-dev libopenjp2-7-dev
 
 Config file
@@ -120,6 +120,7 @@ Now we will install pretix itself. The following steps are to be executed as the
 actually install pretix, we will create a virtual environment to isolate the python packages from your global
 python installation::
 
+    # sudo -u pretix -s
     $ python3 -m venv /var/pretix/venv
     $ source /var/pretix/venv/bin/activate
     (venv)$ pip3 install -U pip setuptools wheel
@@ -215,11 +216,10 @@ The following snippet is an example on how to configure a nginx proxy for pretix
         }
     }
     server {
-        listen 443 default_server;
-        listen [::]:443 ipv6only=on default_server;
+        listen 443 ssl default_server;
+        listen [::]:443 ipv6only=on ssl default_server;
         server_name pretix.mydomain.com;
 
-        ssl on;
         ssl_certificate /path/to/cert.chain.pem;
         ssl_certificate_key /path/to/key.pem;
 
@@ -248,6 +248,14 @@ The following snippet is an example on how to configure a nginx proxy for pretix
             return 404;
         }
 
+        location /static/staticfiles.json {
+            deny all;
+            return 404;
+        }
+        location /static/CACHE/manifest.json {
+            deny all;
+            return 404;
+        }
         location /static/ {
             alias /var/pretix/venv/lib/python3.11/site-packages/pretix/static.dist/;
             access_log off;
@@ -279,11 +287,12 @@ Updates
 
 To upgrade to a new pretix release, pull the latest code changes and run the following commands::
 
+    # sudo -u pretix -s
     $ source /var/pretix/venv/bin/activate
     (venv)$ pip3 install -U --upgrade-strategy eager pretix gunicorn
     (venv)$ python -m pretix migrate
     (venv)$ python -m pretix rebuild
-    (venv)$ python -m pretix updatestyles
+    (venv)$ python -m pretix updateassets
     # systemctl restart pretix-web pretix-worker
 
 Make sure to also read :ref:`update_notes` and the release notes of the version you are updating to. Pay special
@@ -323,7 +332,7 @@ Then, proceed like after any plugin installation::
 
     (venv)$ python -m pretix migrate
     (venv)$ python -m pretix rebuild
-    (venv)$ python -m pretix updatestyles
+    (venv)$ python -m pretix updateassets
     # systemctl restart pretix-web pretix-worker
 
 .. _Postfix: https://www.digitalocean.com/community/tutorials/how-to-install-and-configure-postfix-as-a-send-only-smtp-server-on-ubuntu-22-04

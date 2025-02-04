@@ -124,6 +124,13 @@
                 </button>
             </div>
         </form>
+    {% elif order.status == "e" and order.payment_refund_sum != 0 %}
+        <div class="alert alert-warning">
+            {% blocktrans trimmed with amount=order.payment_refund_sum|money:request.event.currency %}
+                This order is expired even though it received payments of {{ amount }}. You can choose to refund
+                the money below or reactivate it by extending the payment deadline.
+            {% endblocktrans %}
+        </div>
     {% endif %}
 
     <div class="row">
@@ -178,9 +185,9 @@
                             <dt>{% trans "Cancellation date" %}</dt>
                             <dd>{{ order.cancellation_date|date:"SHORT_DATETIME_FORMAT" }}</dd>
                         {% endif %}
-                        {% if sales_channel %}
+                        {% if order.sales_channel %}
                             <dt>{% trans "Sales channel" %}</dt>
-                            <dd>{{ sales_channel.verbose_name }}</dd>
+                            <dd>{{ order.sales_channel.label }}</dd>
                         {% endif %}
                         <dt>{% trans "Order locale" %}</dt>
                         <dd>
@@ -191,7 +198,7 @@
                                 </a>
                             {% endif %}
                         </dd>
-                        {% if order.status == "n" %}
+                        {% if order.status == "n" and not order.require_approval %}
                             <dt>{% trans "Expiry date" %}</dt>
                             <dd>
                                 {{ order.expires|date:"SHORT_DATETIME_FORMAT" }}
@@ -429,7 +436,7 @@
                                 {% endif %}
                                 {% if line.used_membership %}
                                     <br /><span class="fa fa-id-card fa-fw" aria-hidden="true"></span>
-                                    <a href="{% url "control:organizer.customer.membership.edit" organizer=request.organizer.slug customer=order.customer.identifier id=line.used_membership.pk %}">
+                                    <a href="{% url "control:organizer.customer.membership.edit" organizer=request.organizer.slug customer=line.used_membership.customer.identifier id=line.used_membership.pk %}">
                                         {{ line.used_membership }}
                                     </a>
                                 {% endif %}
