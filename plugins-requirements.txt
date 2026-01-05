@@ -1,0 +1,16 @@
+# Custom pretix plugins
+# This file lists custom plugins to be installed during Docker build
+# Plugins can be specified as:
+# - Local paths (relative to repository root): -e ./local/pretix-cliques
+# - Git repositories: git+https://github.com/user/pretix-plugin.git
+# - PyPI packages: pretix-plugin-name
+
+# Example: Install pretix-cliques from local directory
+#-e ./local/pretix-cliques
+
+# Example: Install from Git repository
+git+https://github.com/pretix-unofficial/pretix-cliques.git@master
+
+# Example: Install from PyPI (if published)
+# pretix-cliques
+
