@@ -1,0 +1,6 @@
+[submodule "local/pretix-cliques"]
+	path = local/pretix-cliques
+	url = git@github.com:zugvoegel-festival/pretix-cliques.git
+[submodule "local/pretix-ticket-transfer"]
+	path = local/pretix-ticket-transfer
+	url = git@github.com:zugvoegel-festival/pretix-ticket-transfer.git
