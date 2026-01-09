@@ -1,0 +1,67 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: Django (pretix)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/manage.py",
+            "args": [
+                "runserver",
+                "8000"
+            ],
+            "django": true,
+            "justMyCode": false,
+            "env": {
+                "DJANGO_SETTINGS_MODULE": "pretix.settings",
+                "PYTHONPATH": "${workspaceFolder}/src"
+            },
+            "cwd": "${workspaceFolder}/src",
+            "console": "integratedTerminal",
+            "python": "${workspaceFolder}/env/bin/python"
+        },
+        {
+            "name": "Python: Django (pretix) - Debug Plugins",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/manage.py",
+            "args": [
+                "runserver",
+                "8000"
+            ],
+            "django": true,
+            "justMyCode": false,
+            "env": {
+                "DJANGO_SETTINGS_MODULE": "pretix.settings",
+                "PYTHONPATH": "${workspaceFolder}/src"
+            },
+            "cwd": "${workspaceFolder}/src",
+            "console": "integratedTerminal",
+            "python": "${workspaceFolder}/env/bin/python",
+            "pathMappings": [
+                {
+                    "localRoot": "${workspaceFolder}/local/pretix-cliques",
+                    "remoteRoot": "${workspaceFolder}/local/pretix-cliques"
+                },
+                {
+                    "localRoot": "${workspaceFolder}/local/pretix-ticket-transfer",
+                    "remoteRoot": "${workspaceFolder}/local/pretix-ticket-transfer"
+                }
+            ]
+        },
+        {
+            "name": "Python: Current File",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "python": "${workspaceFolder}/env/bin/python",
+            "env": {
+                "DJANGO_SETTINGS_MODULE": "pretix.settings",
+                "PYTHONPATH": "${workspaceFolder}/src"
+            },
+            "cwd": "${workspaceFolder}/src"
+        }
+    ]
+}
