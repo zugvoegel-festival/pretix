@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: pretix-redis
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  pretix:
+    build:
+      context: .
+      dockerfile: Dockerfile.requirements
+    container_name: pretix-app
+    ports:
+      - "80:80"
+    volumes:
+      - pretix-data:/data
+      - pretix-config:/etc/pretix
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - AUTOMIGRATE=yes
+    restart: unless-stopped
+    command: all
+
+volumes:
+  pretix-data:
+    driver: local
+  pretix-config:
+    driver: local
+  redis-data:
+    driver: local
+

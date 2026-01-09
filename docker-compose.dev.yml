@@ -1,0 +1,53 @@
+version: '3.8'
+
+# Development docker-compose file
+# Run with: docker-compose -f docker-compose.dev.yml up
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: pretix-redis-dev
+    volumes:
+      - redis-dev-data:/data
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  pretix:
+    build:
+      context: .
+      dockerfile: Dockerfile.requirements
+    container_name: pretix-app-dev
+    ports:
+      - "8000:80"
+    volumes:
+      - pretix-dev-data:/data
+      - pretix-dev-config:/etc/pretix
+      # Mount source for development (optional)
+      # - ./src:/pretix/src:ro
+      # - ./local:/pretix/local:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - AUTOMIGRATE=yes
+      - NUM_WORKERS=2
+    restart: unless-stopped
+    command: all
+
+volumes:
+  pretix-dev-data:
+    driver: local
+  pretix-dev-config:
+    driver: local
+  redis-dev-data:
+    driver: local
+
