@@ -65,7 +65,8 @@ RUN pip3 install -U \
 # Create local directory for local plugins (if any)
 RUN mkdir -p /pretix/local
 # Copy plugins directory first (for local plugins) - only if it exists in build context
-# Note: local/ is in .dockerignore, so this will only work if you remove it from .dockerignore
+# Note: local/ might be in .dockerignore, so ensure it's copied if needed
+COPY local /pretix/local
 COPY plugins-requirements.txt /pretix/plugins-requirements.txt
 RUN if [ -f /pretix/plugins-requirements.txt ]; then \
         cd /pretix && \
