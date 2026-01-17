@@ -18,6 +18,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.requirements
+    platform: linux/amd64
     container_name: pretix-app
     ports:
       - "80:80"
