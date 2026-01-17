@@ -5,6 +5,7 @@ from .views import (
     BankSyncAuthorizeView,
     BankSyncCallbackView,
     BankSyncTransactionsView,
+    BankSyncFetchTransactionsView,
 )
 
 urlpatterns = [
@@ -27,5 +28,10 @@ urlpatterns = [
         r'^control/organizer/(?P<organizer>[^/]+)/bank-sync/transactions$',
         BankSyncTransactionsView.as_view(),
         name='transactions'
+    ),
+    re_path(
+        r'^control/organizer/(?P<organizer>[^/]+)/bank-sync/fetch-transactions$',
+        BankSyncFetchTransactionsView.as_view(),
+        name='fetch_transactions'
     ),
 ]

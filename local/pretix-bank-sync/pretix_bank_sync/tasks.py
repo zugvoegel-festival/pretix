@@ -26,7 +26,7 @@ from pretix.base.services.tasks import TransactionAwareTask
 from pretix.celery_app import app
 
 from .models import BankConnection, BankTransaction
-from .services.gocardless_service import GoCardlessService
+from .services.enablebanking_service import EnableBankingService
 
 logger = logging.getLogger(__name__)
 
@@ -315,7 +315,7 @@ def match_transactions(connection: BankConnection):
 
 @app.task(base=TransactionAwareTask, bind=True, max_retries=3, default_retry_delay=60)
 def sync_bank_transactions(self, connection_id: int):
-    """Sync transactions from GoCardless for a bank connection."""
+    """Sync transactions from Enable Banking for a bank connection."""
     with scope(organizer=None):
         try:
             connection = BankConnection.objects.get(pk=connection_id)
@@ -334,30 +334,35 @@ def sync_bank_transactions(self, connection_id: int):
 
         # Get settings
         organizer = connection.organizer
-        client_id = organizer.settings.get('pretix_bank_sync_client_id', '')
-        client_secret = organizer.settings.get('pretix_bank_sync_client_secret', '')
+        application_id = organizer.settings.get('pretix_bank_sync_application_id', '')
+        private_key_path = organizer.settings.get('pretix_bank_sync_private_key_path', '')
         redirect_uri = organizer.settings.get('pretix_bank_sync_redirect_uri', '')
-        sandbox = organizer.settings.get('pretix_bank_sync_sandbox', True)
 
-        if not client_id or not client_secret:
-            logger.error(f"GoCardless credentials not configured for organizer {organizer.slug}")
+        if not application_id or not private_key_path:
+            logger.error(f"Enable Banking credentials not configured for organizer {organizer.slug}")
             connection.status = BankConnection.STATUS_ERROR
-            connection.last_error = "GoCardless credentials not configured"
+            connection.last_error = "Enable Banking credentials not configured"
             connection.last_error_at = now()
             connection.save(update_fields=['status', 'last_error', 'last_error_at'])
             return
 
         try:
             # Initialize service
-            service = GoCardlessService(
-                client_id=client_id,
-                client_secret=client_secret,
-                redirect_uri=redirect_uri,
-                sandbox=sandbox
+            service = EnableBankingService(
+                application_id=application_id,
+                private_key_path=private_key_path,
+                redirect_uri=redirect_uri
             )
 
-            # Get accounts
-            accounts = service.get_accounts(connection.requisition_id)
+            # Get account_uid (stored in requisition_id field)
+            account_uid = connection.requisition_id
+            if not account_uid:
+                logger.error(f"No account UID found for connection {connection_id}")
+                return
+
+            # For Enable Banking, we work with individual accounts
+            # The account_uid is stored in requisition_id
+            accounts = [{"uid": account_uid}]
             if not accounts:
                 logger.warning(f"No accounts found for connection {connection_id}")
                 return
@@ -365,15 +370,15 @@ def sync_bank_transactions(self, connection_id: int):
             # Get transactions for each account
             new_transactions = []
             for account in accounts:
-                account_id = account.get('id', '')
-                if not account_id:
+                account_uid = account.get('uid', '')
+                if not account_uid:
                     continue
 
                 try:
-                    transactions = service.get_transactions(account_id)
+                    transactions = service.get_transactions(account_uid)
                     for tx_data in transactions:
                         # Normalize transaction
-                        normalized = service.normalize_transaction(tx_data, account_id)
+                        normalized = service.normalize_transaction(tx_data, account_uid)
 
                         # Check if transaction already exists
                         transaction_id = normalized.get('transaction_id')
@@ -407,14 +412,11 @@ def sync_bank_transactions(self, connection_id: int):
                 logger.info(f"Synced {len(new_transactions)} new transactions for connection {connection_id}")
                 match_transactions(connection)
 
-            # Check consent status
-            try:
-                consent_status = service.get_consent_status(connection.requisition_id)
-                if consent_status.get('status') == 'EXPIRED':
-                    connection.status = BankConnection.STATUS_EXPIRED
-                    connection.save(update_fields=['status'])
-            except Exception as e:
-                logger.warning(f"Error checking consent status: {e}")
+            # Check if consent has expired
+            if connection.consent_expires_at and connection.consent_expires_at < now():
+                connection.status = BankConnection.STATUS_EXPIRED
+                connection.save(update_fields=['status'])
+                logger.warning(f"Connection {connection_id} consent has expired")
 
         except Exception as e:
             logger.error(f"Error syncing transactions for connection {connection_id}: {e}")

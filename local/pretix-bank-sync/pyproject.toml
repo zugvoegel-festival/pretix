@@ -1,7 +1,7 @@
 [project]
 name = "pretix-bank-sync"
 dynamic = ["version"]
-description = "Sync bank account transactions via GoCardless and automatically match them to orders"
+description = "Sync bank account transactions via Enable Banking and automatically match them to orders"
 readme = "README.rst"
 license = {text = "Apache"}
 keywords = ["pretix"]
@@ -13,7 +13,9 @@ maintainers = [
 ]
 
 dependencies = [
-    "gocardless-pro>=1.0.0",
+    "requests>=2.25.0",
+    "PyJWT>=2.0.0",
+    "cryptography>=3.0.0",
 ]
 
 [project.entry-points."pretix.plugin"]

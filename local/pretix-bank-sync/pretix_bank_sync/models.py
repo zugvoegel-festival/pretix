@@ -1,7 +1,7 @@
 """
 Models for Bank Sync plugin.
 
-Stores bank connections and synced transactions from GoCardless.
+Stores bank connections and synced transactions from Enable Banking.
 """
 import hashlib
 import re
@@ -16,7 +16,7 @@ from pretix.base.models.base import LoggedModel
 
 class BankConnection(LoggedModel):
     """
-    Represents a GoCardless bank account connection for an organizer.
+    Represents an Enable Banking bank account connection for an organizer.
     """
     STATUS_PENDING = 'pending'
     STATUS_ACTIVE = 'active'
@@ -39,18 +39,18 @@ class BankConnection(LoggedModel):
         help_text=_("The organizer this bank connection belongs to")
     )
 
-    # GoCardless identifiers
+    # Enable Banking identifiers
     requisition_id = models.CharField(
         max_length=255,
         unique=True,
         db_index=True,
-        help_text=_("GoCardless requisition ID")
+        help_text=_("Enable Banking consent ID (stored in requisition_id field for compatibility)")
     )
 
     # Access token (should be encrypted in production)
     access_token = models.TextField(
         blank=True,
-        help_text=_("GoCardless access token (encrypted)")
+        help_text=_("Enable Banking access token (encrypted)")
     )
 
     # Connection status
@@ -86,7 +86,7 @@ class BankConnection(LoggedModel):
     consent_id = models.CharField(
         max_length=255,
         blank=True,
-        help_text=_("GoCardless consent ID")
+        help_text=_("Enable Banking consent ID")
     )
 
     # Error tracking
@@ -134,7 +134,7 @@ class BankConnection(LoggedModel):
 
 class BankTransaction(LoggedModel):
     """
-    Represents a bank transaction synced from GoCardless.
+    Represents a bank transaction synced from Enable Banking.
     """
     STATE_UNCHECKED = 'unchecked'
     STATE_NOMATCH = 'nomatch'
@@ -159,17 +159,17 @@ class BankTransaction(LoggedModel):
         help_text=_("The bank connection this transaction belongs to")
     )
 
-    # GoCardless transaction data
+    # Enable Banking transaction data
     transaction_id = models.CharField(
         max_length=255,
         unique=True,
         db_index=True,
-        help_text=_("GoCardless transaction ID")
+        help_text=_("Enable Banking transaction ID")
     )
     account_id = models.CharField(
         max_length=255,
         db_index=True,
-        help_text=_("GoCardless account ID")
+        help_text=_("Enable Banking account ID")
     )
 
     # Transaction details
@@ -260,7 +260,7 @@ class BankTransaction(LoggedModel):
     # Metadata
     raw_data = models.JSONField(
         default=dict,
-        help_text=_("Raw transaction data from GoCardless")
+        help_text=_("Raw transaction data from Enable Banking")
     )
 
     created = models.DateTimeField(auto_now_add=True)

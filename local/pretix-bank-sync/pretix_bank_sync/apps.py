@@ -15,7 +15,7 @@ class PluginApp(PluginConfig):
     class PretixPluginMeta:
         name = gettext_lazy("Bank Sync")
         author = "pretix"
-        description = gettext_lazy("Sync bank account transactions via GoCardless and automatically match them to orders")
+        description = gettext_lazy("Sync bank account transactions via Enable Banking and automatically match them to orders")
         visible = True
         version = __version__
         category = "INTEGRATION"
