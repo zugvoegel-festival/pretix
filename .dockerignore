@@ -1,7 +1,7 @@
 doc/
 env/
 res/
-local/
+# local/ - commented out to allow local plugins in Docker build
 .git/
 pretixeu/
 src/data/

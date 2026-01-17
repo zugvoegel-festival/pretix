@@ -62,7 +62,10 @@ RUN pip3 install -U \
     rm -rf ~/.cache/pip
 
 # Install custom plugins from requirements file
-# Copy plugins directory first (for local plugins)
+# Create local directory for local plugins (if any)
+RUN mkdir -p /pretix/local
+# Copy plugins directory first (for local plugins) - only if it exists in build context
+# Note: local/ might be in .dockerignore, so ensure it's copied if needed
 COPY local /pretix/local
 COPY plugins-requirements.txt /pretix/plugins-requirements.txt
 RUN if [ -f /pretix/plugins-requirements.txt ]; then \
@@ -73,6 +76,14 @@ RUN if [ -f /pretix/plugins-requirements.txt ]; then \
         DJANGO_SETTINGS_MODULE=pretix.settings pip3 install --no-build-isolation -r plugins-requirements.txt && \
         rm -rf ~/.cache/pip; \
     fi
+
+# Fix pretix-ticket-transfer compatibility issue
+# The _payment_fee_diff() method was removed from OrderChangeManager in newer pretix versions
+# Add it as a no-op method since payment fees are recalculated in _recalculate_total_and_payment_fee()
+RUN python3 -c "import re, os; f='/usr/local/lib/python3.11/site-packages/pretix_ticket_transfer/user_split.py'; \
+    os.path.exists(f) and open(f, 'r+').write(re.sub(r'(class TicketTransferChangeManager\(OrderChangeManager\):.*?)(\n    def commit\(self, check_quotas=True\):)', \
+    r'\1\n    def _payment_fee_diff(self):\n        \"\"\"No-op method - payment fees are recalculated in _recalculate_total_and_payment_fee()\"\"\"\n        pass\2', \
+    open(f).read(), flags=re.DOTALL)) if 'def _payment_fee_diff(self):' not in open(f).read() else None" || true
 
 RUN chmod +x /usr/local/bin/pretix && \
     rm /etc/nginx/sites-enabled/default && \
