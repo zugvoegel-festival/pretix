@@ -4,3 +4,6 @@
 [submodule "local/pretix-ticket-transfer"]
 	path = local/pretix-ticket-transfer
 	url = git@github.com:zugvoegel-festival/pretix-ticket-transfer.git
+[submodule "local/pretix-ticketbourse"]
+	path = local/pretix-ticketbourse
+	url = https://git.kulturkosmos.de/ticketing/pretix-ticketbourse.git

@@ -14,8 +14,8 @@
 # Example: Install from Git repository (commented out for local development)
 # git+https://github.com/pretix-unofficial/pretix-cliques.git@master
 
-# Install pretix-ticketbourse from Git repository
-#git+https://git.kulturkosmos.de/ticketing/pretix-ticketbourse.git
+# Install pretix-ticketbourse from local directory (development)
+-e ./local/pretix-ticketbourse
 
 # Install pretix-fontpack-free from PyPI
 #pretix-fontpack-free
