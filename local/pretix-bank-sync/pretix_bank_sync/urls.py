@@ -2,22 +2,44 @@ from django.urls import re_path
 
 from .views import (
     BankSyncSettingsView,
-    BankSyncAuthorizeView,
     BankSyncCallbackView,
     BankSyncTransactionsView,
     BankSyncFetchTransactionsView,
+    BankSetupWizardView,
+    BankConnectionsListView,
+    BankConnectionDeleteView,
+    BankConnectionRenewView,
+    BankInstitutionsAjaxView,
+    TransactionMatchReviewView,
+    TransactionMatchApproveView,
+    TransactionMatchRejectView,
 )
 
 urlpatterns = [
     re_path(
+        r'^control/organizer/(?P<organizer>[^/]+)/bank-sync/$',
+        BankConnectionsListView.as_view(),
+        name='connections_list'
+    ),
+    re_path(
+        r'^control/organizer/(?P<organizer>[^/]+)/bank-sync/setup$',
+        BankSetupWizardView.as_view(),
+        name='bank_setup_wizard'
+    ),
+    re_path(
+        r'^control/organizer/(?P<organizer>[^/]+)/bank-sync/connections/(?P<connection_id>\d+)/renew$',
+        BankConnectionRenewView.as_view(),
+        name='connection_renew'
+    ),
+    re_path(
+        r'^control/organizer/(?P<organizer>[^/]+)/bank-sync/connections/(?P<pk>\d+)/delete$',
+        BankConnectionDeleteView.as_view(),
+        name='connection_delete'
+    ),
+    re_path(
         r'^control/organizer/(?P<organizer>[^/]+)/bank-sync/settings$',
         BankSyncSettingsView.as_view(),
         name='settings'
-    ),
-    re_path(
-        r'^control/organizer/(?P<organizer>[^/]+)/bank-sync/authorize$',
-        BankSyncAuthorizeView.as_view(),
-        name='authorize'
     ),
     re_path(
         r'^control/organizer/(?P<organizer>[^/]+)/bank-sync/callback$',
@@ -33,5 +55,25 @@ urlpatterns = [
         r'^control/organizer/(?P<organizer>[^/]+)/bank-sync/fetch-transactions$',
         BankSyncFetchTransactionsView.as_view(),
         name='fetch_transactions'
+    ),
+    re_path(
+        r'^control/organizer/(?P<organizer>[^/]+)/bank-sync/institutions-ajax$',
+        BankInstitutionsAjaxView.as_view(),
+        name='institutions_ajax'
+    ),
+    re_path(
+        r'^control/organizer/(?P<organizer>[^/]+)/event/(?P<event>[^/]+)/bank-sync/match-review$',
+        TransactionMatchReviewView.as_view(),
+        name='match_review'
+    ),
+    re_path(
+        r'^control/organizer/(?P<organizer>[^/]+)/event/(?P<event>[^/]+)/bank-sync/match-suggestions/(?P<suggestion_id>\d+)/approve$',
+        TransactionMatchApproveView.as_view(),
+        name='match_approve'
+    ),
+    re_path(
+        r'^control/organizer/(?P<organizer>[^/]+)/event/(?P<event>[^/]+)/bank-sync/match-suggestions/(?P<suggestion_id>\d+)/reject$',
+        TransactionMatchRejectView.as_view(),
+        name='match_reject'
     ),
 ]

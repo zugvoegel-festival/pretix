@@ -1,191 +1,71 @@
 {% extends "pretixcontrol/base.html" %}
 {% load i18n %}
 {% load bootstrap3 %}
+{% load static %}
+{% load compress %}
+
 {% block title %}{% trans "Bank Sync Settings" %}{% endblock %}
+
+{% block custom_header %}
+    {{ block.super }}
+    {% compress css %}
+        <link rel="stylesheet" type="text/x-scss" href="{% static "pretix_bank_sync/scss/bank_sync_common.scss" %}" />
+    {% endcompress %}
+{% endblock %}
+
 {% block content %}
     <h1>{% trans "Bank Sync Settings" %}</h1>
-
-    <div class="panel panel-default">
-        <div class="panel-heading">
-            <h3 class="panel-title">{% trans "Enable Banking Configuration" %}</h3>
-        </div>
-        <div class="panel-body">
-            <form action="" method="post" class="form-horizontal" enctype="multipart/form-data">
-                {% csrf_token %}
-                {% bootstrap_form_errors form %}
-                <fieldset>
-                    <legend>{% trans "API Credentials" %}</legend>
-                    {% bootstrap_field form.pretix_bank_sync_application_id layout="control" %}
-                    {% bootstrap_field form.pretix_bank_sync_private_key_file layout="control" %}
-                    {% if form.pretix_bank_sync_private_key_path.value %}
-                        <div class="form-group">
-                            <label class="col-md-3 control-label">{% trans "Current Key File" %}</label>
-                            <div class="col-md-9">
-                                <p class="form-control-static">
-                                    <code>{{ form.pretix_bank_sync_private_key_path.value }}</code>
-                                </p>
-                                <p class="help-block text-muted">
-                                    <span class="fa fa-info-circle"></span>
-                                    {% trans "Upload a new file to replace the existing one." %}
-                                </p>
-                            </div>
-                        </div>
-                    {% endif %}
-                    {% bootstrap_field form.pretix_bank_sync_redirect_uri layout="control" %}
-                    {% if actual_callback_url %}
-                        <div class="form-group">
-                            <label class="col-md-3 control-label">{% trans "Actual Callback URL" %}</label>
-                            <div class="col-md-9">
-                                <p class="form-control-static">
-                                    <code>{{ actual_callback_url }}</code>
-                                </p>
-                                <p class="help-block text-warning">
-                                    <span class="fa fa-exclamation-triangle"></span>
-                                    {% trans "This is the actual callback URL that will be used. Make sure this EXACT URL is whitelisted in your Enable Banking dashboard." %}
-                                </p>
-                            </div>
-                        </div>
-                    {% endif %}
-                    {% bootstrap_field form.pretix_bank_sync_auto_confirm layout="control" %}
-                </fieldset>
-                <div class="form-group submit-group">
-                    <button type="submit" class="btn btn-primary btn-save">
-                        {% trans "Save" %}
-                    </button>
-                </div>
-            </form>
-        </div>
+    
+    <div class="bank-sync-margin-bottom">
+        <a href="{% url 'plugins:pretix_bank_sync:connections_list' organizer=organizer.slug %}" class="btn btn-default">
+            <span class="fa fa-arrow-left"></span>
+            {% trans "Back to Connections" %}
+        </a>
     </div>
 
-    <div class="panel panel-default">
-        <div class="panel-heading">
-            <h3 class="panel-title">{% trans "Bank Connection" %}</h3>
-        </div>
-        <div class="panel-body">
-            {% if connection %}
-                <dl class="dl-horizontal">
-                    <dt>{% trans "Status" %}</dt>
-                    <dd>
-                        <span class="label label-{% if connection.status == 'active' %}success{% elif connection.status == 'expired' %}warning{% elif connection.status == 'error' %}danger{% else %}default{% endif %}">
-                            {{ connection.get_status_display }}
-                        </span>
-                    </dd>
-                    {% if connection.last_sync %}
-                        <dt>{% trans "Last sync" %}</dt>
-                        <dd>{{ connection.last_sync|date:"SHORT_DATETIME_FORMAT" }}</dd>
-                    {% endif %}
-                    <dt>{% trans "Syncs today" %}</dt>
-                    <dd>{{ connection.sync_count_today }} / 4</dd>
-                    {% if connection.consent_expires_at %}
-                        <dt>{% trans "Consent expires" %}</dt>
-                        <dd>{{ connection.consent_expires_at|date:"SHORT_DATETIME_FORMAT" }}</dd>
-                    {% endif %}
-                    {% if connection.last_error %}
-                        <dt>{% trans "Last error" %}</dt>
-                        <dd class="text-danger">{{ connection.last_error }}</dd>
-                    {% endif %}
-                </dl>
-
-                {% if connection.status == 'pending' %}
-                    <div class="alert alert-info">
-                        <p>
-                            <span class="fa fa-clock-o"></span>
-                            <strong>{% trans "Authorization pending" %}</strong>
-                        </p>
-                        <p>{% trans "You have started the authorization process but haven't completed it yet." %}</p>
-                        <form action="{% url 'plugins:pretix_bank_sync:authorize' organizer=organizer.slug %}" method="get" class="form-inline">
-                            <button type="submit" class="btn btn-primary">
-                                <span class="fa fa-external-link"></span>
-                                {% trans "Continue Authorization" %}
-                            </button>
-                        </form>
-                        <p class="help-block" style="margin-top: 10px;">
-                            {% trans "Click the button above to return to the bank selection and continue the authorization process." %}
-                        </p>
-                    </div>
-                {% elif connection.status == 'expired' or connection.status == 'error' %}
-                    <form action="{% url 'plugins:pretix_bank_sync:authorize' organizer=organizer.slug %}" method="get" class="form-inline">
-                        <button type="submit" class="btn btn-primary">
-                            <span class="fa fa-refresh"></span>
-                            {% trans "Reauthorize" %}
-                        </button>
-                    </form>
-                {% elif connection.status == 'active' %}
-                    <p class="text-success">
-                        <span class="fa fa-check-circle"></span>
-                        {% trans "Bank account is connected and active." %}
-                    </p>
-                    <form action="{% url 'plugins:pretix_bank_sync:fetch_transactions' organizer=organizer.slug %}" method="post" class="form-inline" style="margin-top: 15px;">
+    <!-- GoCardless Configuration -->
+    <div>
+        <!-- GoCardless Tab -->
+        <div id="gocardless">
+            <div class="panel panel-default">
+                <div class="panel-heading">
+                    <h3 class="panel-title">{% trans "GoCardless Configuration" %}</h3>
+                </div>
+                <div class="panel-body">
+                    <form action="" method="post" class="form-horizontal">
                         {% csrf_token %}
-                        <button type="submit" class="btn btn-primary">
-                            <span class="fa fa-download"></span>
-                            {% trans "Fetch Transactions" %}
-                        </button>
-                        <a href="{% url 'plugins:pretix_bank_sync:transactions' organizer=organizer.slug %}" class="btn btn-default">
-                            <span class="fa fa-list"></span>
-                            {% trans "View All Transactions" %}
-                        </a>
+                        <input type="hidden" name="tab" value="gocardless">
+                        <fieldset>
+                            <legend>{% trans "API Credentials" %}</legend>
+                            <div class="form-group">
+                                <label class="col-md-3 control-label">{% trans "Client ID (Secret ID)" %}</label>
+                                <div class="col-md-9">
+                                    <input type="text" name="gocardless_client_id" class="form-control" 
+                                           value="{{ gocardless_client_id }}" 
+                                           placeholder="{% trans 'Enter your GoCardless Secret ID' %}">
+                                    <p class="help-block">{% trans "Your GoCardless Secret ID from the User Secrets section in the Bank Account Data portal" %}</p>
+                                </div>
+                            </div>
+                            
+                            <div class="form-group">
+                                <label class="col-md-3 control-label">{% trans "Client Secret (Secret Key)" %}</label>
+                                <div class="col-md-9">
+                                    <input type="password" name="gocardless_client_secret" class="form-control" 
+                                           value="{{ gocardless_client_secret }}" 
+                                           placeholder="{% trans 'Enter your GoCardless Secret Key' %}">
+                                    <p class="help-block">{% trans "Your GoCardless Secret Key from the User Secrets section" %}</p>
+                                </div>
+                            </div>
+                            
+                        </fieldset>
+                        <div class="form-group submit-group">
+                            <button type="submit" class="btn btn-primary btn-save">
+                                {% trans "Save" %}
+                            </button>
+                        </div>
                     </form>
-                {% endif %}
-            {% else %}
-                <p>{% trans "No bank account connected yet." %}</p>
-                <form action="{% url 'plugins:pretix_bank_sync:authorize' organizer=organizer.slug %}" method="post" class="form-inline">
-                    {% csrf_token %}
-                    <button type="submit" class="btn btn-primary">
-                        <span class="fa fa-link"></span>
-                        {% trans "Connect Bank Account" %}
-                    </button>
-                </form>
-            {% endif %}
+                </div>
+            </div>
         </div>
     </div>
-
-    {% if connection and recent_transactions %}
-        <div class="panel panel-default">
-            <div class="panel-heading">
-                <h3 class="panel-title">{% trans "Recent Transactions" %}</h3>
-            </div>
-            <div class="panel-body">
-                <div class="table-responsive">
-                    <table class="table table-condensed">
-                        <thead>
-                            <tr>
-                                <th>{% trans "Date" %}</th>
-                                <th>{% trans "Amount" %}</th>
-                                <th>{% trans "Reference" %}</th>
-                                <th>{% trans "Status" %}</th>
-                                <th>{% trans "Order" %}</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {% for trans in recent_transactions %}
-                                <tr>
-                                    <td>{{ trans.date|date:"SHORT_DATE_FORMAT" }}</td>
-                                    <td>{{ trans.amount }} {{ trans.currency }}</td>
-                                    <td>{{ trans.reference|truncatewords:5 }}</td>
-                                    <td>
-                                        <span class="label label-{% if trans.state == 'matched' %}success{% elif trans.state == 'nomatch' %}warning{% elif trans.state == 'error' %}danger{% else %}default{% endif %}">
-                                            {{ trans.get_state_display }}
-                                        </span>
-                                    </td>
-                                    <td>
-                                        {% if trans.order %}
-                                            <a href="{% url 'control:event.order' organizer=trans.order.event.organizer.slug event=trans.order.event.slug code=trans.order.code %}">
-                                                {{ trans.order.code }}
-                                            </a>
-                                        {% else %}
-                                            -
-                                        {% endif %}
-                                    </td>
-                                </tr>
-                            {% endfor %}
-                        </tbody>
-                    </table>
-                </div>
-                <a href="{% url 'plugins:pretix_bank_sync:transactions' organizer=organizer.slug %}" class="btn btn-default">
-                    {% trans "View all transactions" %}
-                </a>
-            </div>
-        </div>
-    {% endif %}
 {% endblock %}

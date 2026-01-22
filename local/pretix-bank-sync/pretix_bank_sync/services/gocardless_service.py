@@ -22,10 +22,9 @@ class GoCardlessService:
     """
 
     # API endpoints
-    SANDBOX_BASE_URL = "https://bankaccountdata.gocardless.com/api/v2"
-    PRODUCTION_BASE_URL = "https://bankaccountdata.gocardless.com/api/v2"
+    BASE_URL = "https://bankaccountdata.gocardless.com/api/v2"
 
-    def __init__(self, client_id: str, client_secret: str, redirect_uri: str, sandbox: bool = True):
+    def __init__(self, client_id: str, client_secret: str, redirect_uri: str):
         """
         Initialize GoCardless service.
 
@@ -33,13 +32,11 @@ class GoCardlessService:
             client_id: GoCardless client ID
             client_secret: GoCardless client secret
             redirect_uri: OAuth redirect URI
-            sandbox: Use sandbox environment (default: True)
         """
         self.client_id = client_id
         self.client_secret = client_secret
         self.redirect_uri = redirect_uri
-        self.sandbox = sandbox
-        self.base_url = self.SANDBOX_BASE_URL if sandbox else self.PRODUCTION_BASE_URL
+        self.base_url = self.BASE_URL
 
     def _get_access_token(self) -> Optional[str]:
         """
@@ -58,10 +55,63 @@ class GoCardlessService:
             response = requests.post(url, json=data, timeout=30)
             response.raise_for_status()
             token_data = response.json()
-            return token_data.get("access")
+            access_token = token_data.get("access")
+            if not access_token:
+                logger.error("GoCardless API returned no access token in response")
+            return access_token
+        except requests.HTTPError as e:
+            # Log detailed error information for debugging
+            error_detail = ""
+            try:
+                error_data = response.json()
+                error_detail = error_data.get("detail", error_data.get("error", ""))
+            except:
+                error_detail = response.text[:200] if hasattr(response, 'text') else str(e)
+            logger.error(f"Failed to get GoCardless access token (HTTP {response.status_code}): {error_detail}")
+            # Return None to maintain backward compatibility with existing code
+            return None
         except requests.RequestException as e:
             logger.error(f"Failed to get GoCardless access token: {e}")
+            # Return None to maintain backward compatibility
             return None
+
+    def list_institutions(self, country: Optional[str] = None) -> List[Dict]:
+        """
+        List available institutions (banks) for a country.
+
+        Args:
+            country: ISO country code (e.g., 'GB', 'DE', 'FR'). If None, returns all.
+
+        Returns:
+            List of institution data
+        """
+        access_token = self._get_access_token()
+        if not access_token:
+            raise Exception("Failed to authenticate with GoCardless")
+
+        url = f"{self.base_url}/institutions/"
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+        }
+        params = {}
+        if country:
+            params["country"] = country
+
+        try:
+            response = requests.get(url, headers=headers, params=params, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+            # Handle both response formats: list directly or dict with "results" key
+            if isinstance(data, list):
+                return data
+            elif isinstance(data, dict):
+                return data.get("results", [])
+            else:
+                logger.warning(f"Unexpected response format from institutions API: {type(data)}")
+                return []
+        except requests.RequestException as e:
+            logger.error(f"Failed to list institutions: {e}")
+            raise Exception(f"Failed to list institutions: {e}")
 
     def create_requisition_link(
         self,
@@ -194,6 +244,38 @@ class GoCardlessService:
         except requests.RequestException as e:
             logger.error(f"Failed to get account {account_id}: {e}")
             return None
+
+    def get_balances(self, account_id: str) -> List[Dict]:
+        """
+        Get balances for an account.
+
+        Args:
+            account_id: The account ID
+
+        Returns:
+            List of balance data with fields like:
+            - balanceAmount: Dict with 'amount' and 'currency'
+            - balanceType: 'current', 'available', 'interimAvailable', etc.
+            - referenceDate: Date of the balance
+            - creditLimitIncluded: Boolean indicating if credit limit is included
+        """
+        access_token = self._get_access_token()
+        if not access_token:
+            raise Exception("Failed to authenticate with GoCardless")
+
+        url = f"{self.base_url}/accounts/{account_id}/balances/"
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+        }
+
+        try:
+            response = requests.get(url, headers=headers, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+            return data.get("balances", [])
+        except requests.RequestException as e:
+            logger.error(f"Failed to get balances for account {account_id}: {e}")
+            raise Exception(f"Failed to get balances: {e}")
 
     def get_transactions(
         self,

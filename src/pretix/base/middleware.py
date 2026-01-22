@@ -279,7 +279,7 @@ class SecurityMiddleware(MiddlewareMixin):
             'script-src': ['{static}'],
             'object-src': ["'none'"],
             'frame-src': ['{static}'],
-            'style-src': ["{static}", "{media}"],
+            'style-src': ["{static}", "{media}", "'unsafe-hashes'"],
             'connect-src': ["{dynamic}", "{media}"],
             'img-src': ["{static}", "{media}", "data:"] + img_src,
             'font-src': ["{static}"] + list(font_src),

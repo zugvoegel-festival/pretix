@@ -26,6 +26,9 @@ Configure your Enable Banking API credentials in the plugin settings.
 
 You can sign up for Enable Banking at https://enablebanking.com/
 
+
+https://bankaccountdata.gocardless.com/overview/
+
 License
 -------
 
