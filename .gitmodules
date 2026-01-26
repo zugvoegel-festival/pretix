@@ -7,3 +7,6 @@
 [submodule "local/pretix-ticketbourse"]
 	path = local/pretix-ticketbourse
 	url = https://git.kulturkosmos.de/ticketing/pretix-ticketbourse.git
+[submodule "local/pretix-bank-sync"]
+	path = local/pretix-bank-sync
+	url = git@github.com:zugvoegel-festival/pretix-bank-sync.git
