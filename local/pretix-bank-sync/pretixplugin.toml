@@ -1,0 +1,4 @@
+[plugin]
+package = "pretix-bank-sync"
+modules = [ "pretix_bank_sync" ]
+marketplace_name = "bank-sync"
