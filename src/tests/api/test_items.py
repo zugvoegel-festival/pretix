@@ -50,6 +50,7 @@ from pretix.base.models import (
     QuestionOption, Quota,
 )
 from pretix.base.models.orders import OrderFee
+from pretix.testutils.queries import assert_num_queries
 
 
 @pytest.fixture
@@ -423,6 +424,13 @@ def test_item_list(token_client, organizer, event, team, item):
 
 
 @pytest.mark.django_db
+def test_item_list_queries(token_client, organizer, event, team, item, item3):
+    with assert_num_queries(16):
+        resp = token_client.get('/api/v1/organizers/{}/events/{}/items/'.format(organizer.slug, event.slug))
+        assert resp.status_code == 200
+
+
+@pytest.mark.django_db
 def test_item_detail(token_client, organizer, event, team, item):
     res = dict(TEST_ITEM_RES)
     res["id"] = item.pk
@@ -522,6 +530,7 @@ def test_item_detail_program_times(token_client, organizer, event, team, item, c
     res["program_times"] = [{
         "start": "2017-12-27T00:00:00Z",
         "end": "2017-12-28T00:00:00Z",
+        "location": None
     }]
     resp = token_client.get('/api/v1/organizers/{}/events/{}/items/{}/'.format(organizer.slug, event.slug,
                                                                                item.pk))
@@ -991,7 +1000,6 @@ def test_item_create_with_bundle(token_client, organizer, event, item, category,
             "bundles": [
                 {
                     "bundled_item": i.pk,
-                    "bundled_variation": None,
                     "count": 2,
                     "designated_price": "3.00",
                 }
@@ -1919,6 +1927,14 @@ def test_addons_update(token_client, organizer, event, item, addon):
     resp = token_client.patch(
         '/api/v1/organizers/{}/events/{}/items/{}/addons/{}/'.format(organizer.slug, event.slug, item.pk, addon.pk),
         {
+        },
+        format='json'
+    )
+    assert resp.status_code == 200
+
+    resp = token_client.patch(
+        '/api/v1/organizers/{}/events/{}/items/{}/addons/{}/'.format(organizer.slug, event.slug, item.pk, addon.pk),
+        {
             "min_count": 100,
             "max_count": 101
         },
@@ -1964,32 +1980,54 @@ def program_time2(item, category):
                                      end=datetime(2017, 12, 30, 0, 0, 0, tzinfo=timezone.utc))
 
 
+@pytest.fixture
+def program_time3(item, category):
+    return item.program_times.create(start=datetime(2017, 12, 30, 0, 0, 0, tzinfo=timezone.utc),
+                                     end=datetime(2017, 12, 31, 0, 0, 0, tzinfo=timezone.utc),
+                                     location='Testlocation')
+
+
 TEST_PROGRAM_TIMES_RES = {
     0: {
         "start": "2017-12-27T00:00:00Z",
         "end": "2017-12-28T00:00:00Z",
+        "location": None,
     },
     1: {
         "start": "2017-12-29T00:00:00Z",
         "end": "2017-12-30T00:00:00Z",
+        "location": None,
+    },
+    2: {
+        "start": "2017-12-30T00:00:00Z",
+        "end": "2017-12-31T00:00:00Z",
+        "location": {"en": "Testlocation"},
     }
 }
 
 
 @pytest.mark.django_db
-def test_program_times_list(token_client, organizer, event, item, program_time, program_time2):
+def test_program_times_list(token_client, organizer, event, item, program_time, program_time2, program_time3):
     res = dict(TEST_PROGRAM_TIMES_RES)
     res[0]["id"] = program_time.pk
     res[1]["id"] = program_time2.pk
+    res[2]["id"] = program_time3.pk
     resp = token_client.get('/api/v1/organizers/{}/events/{}/items/{}/program_times/'.format(organizer.slug, event.slug,
                                                                                              item.pk))
     assert resp.status_code == 200
     assert res[0]['start'] == resp.data['results'][0]['start']
     assert res[0]['end'] == resp.data['results'][0]['end']
     assert res[0]['id'] == resp.data['results'][0]['id']
+    assert res[0] == resp.data['results'][0]
     assert res[1]['start'] == resp.data['results'][1]['start']
     assert res[1]['end'] == resp.data['results'][1]['end']
     assert res[1]['id'] == resp.data['results'][1]['id']
+    assert res[1] == resp.data['results'][1]
+    assert res[2]['start'] == resp.data['results'][2]['start']
+    assert res[2]['end'] == resp.data['results'][2]['end']
+    assert res[2]['location'] == resp.data['results'][2]['location']
+    assert res[2]['id'] == resp.data['results'][2]['id']
+    assert res[2] == resp.data['results'][2]
 
 
 @pytest.mark.django_db
@@ -2029,6 +2067,59 @@ def test_program_times_create(token_client, organizer, event, item):
     )
     assert resp.status_code == 400
     assert resp.content.decode() == '{"non_field_errors":["The program end must not be before the program start."]}'
+
+
+@pytest.mark.django_db
+def test_program_times_create_location(token_client, organizer, event, item):
+    resp = token_client.post(
+        '/api/v1/organizers/{}/events/{}/items/{}/program_times/'.format(organizer.slug, event.slug, item.pk),
+        {
+            "start": "2017-12-27T00:00:00Z",
+            "end": "2017-12-28T00:00:00Z",
+            "location": {
+                "en": "Testlocation",
+                "de": "Testort"
+            }
+        },
+        format='json'
+    )
+    assert resp.status_code == 201
+    with scopes_disabled():
+        program_time = ItemProgramTime.objects.get(pk=resp.data['id'])
+    assert "Testlocation" == program_time.location.localize("en")
+    assert "Testort" == program_time.location.localize("de")
+
+
+@pytest.mark.django_db
+def test_program_times_create_without_location(token_client, organizer, event, item):
+    resp = token_client.post(
+        '/api/v1/organizers/{}/events/{}/items/{}/program_times/'.format(organizer.slug, event.slug, item.pk),
+        {
+            "start": "2017-12-27T00:00:00Z",
+            "end": "2017-12-28T00:00:00Z"
+        },
+        format='json'
+    )
+    assert resp.status_code == 201
+    assert resp.data['location'] is None
+    with scopes_disabled():
+        program_time = ItemProgramTime.objects.get(pk=resp.data['id'])
+    assert str(program_time.location) == ""
+
+    resp = token_client.post(
+        '/api/v1/organizers/{}/events/{}/items/{}/program_times/'.format(organizer.slug, event.slug, item.pk),
+        {
+            "start": "2017-12-27T00:00:00Z",
+            "end": "2017-12-28T00:00:00Z",
+            "location": None
+        },
+        format='json'
+    )
+    assert resp.status_code == 201
+    assert resp.data['location'] is None
+    with scopes_disabled():
+        program_time = ItemProgramTime.objects.get(pk=resp.data['id'])
+    assert str(program_time.location) == ""
 
 
 @pytest.mark.django_db
@@ -2395,6 +2486,7 @@ TEST_QUESTION_RES = {
     "valid_datetime_min": None,
     "valid_datetime_max": None,
     "valid_file_portrait": False,
+    "valid_string_length_min": None,
     "valid_string_length_max": None,
     "help_text": {"en": "This is an example question"},
     "options": [

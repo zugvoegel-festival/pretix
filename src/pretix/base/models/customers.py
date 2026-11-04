@@ -33,6 +33,7 @@ from django.db.models.aggregates import Sum
 from django.db.models.expressions import OuterRef, Subquery
 from django.db.models.functions.comparison import Coalesce
 from django.utils.crypto import get_random_string, salted_hmac
+from django.utils.functional import cached_property
 from django.utils.timezone import now
 from django.utils.translation import gettext_lazy as _, pgettext_lazy
 from django_scopes import ScopedManager, scopes_disabled
@@ -40,6 +41,7 @@ from i18nfield.fields import I18nCharField
 from phonenumber_field.modelfields import PhoneNumberField
 
 from pretix.base.banlist import banned
+from pretix.base.i18n import language
 from pretix.base.models.base import LoggedModel
 from pretix.base.models.fields import MultiStringField
 from pretix.base.models.giftcards import GiftCardTransaction
@@ -164,6 +166,28 @@ class Customer(LoggedModel):
         self.attendee_profiles.all().delete()
         self.invoice_addresses.all().delete()
 
+    def send_security_notice(self, message, email=None):
+        from pretix.base.services.mail import SendMailException, mail
+        from pretix.multidomain.urlreverse import eventreverse_absolute
+
+        try:
+            with language(self.locale):
+                mail(
+                    email or self.email,
+                    self.organizer.settings.mail_subject_customer_security_notice,
+                    self.organizer.settings.mail_text_customer_security_notice,
+                    {
+                        **self.get_email_context(),
+                        'message': str(message),
+                        'url': eventreverse_absolute(self.organizer, 'presale:organizer.customer.index')
+                    },
+                    customer=self,
+                    organizer=self.organizer,
+                    locale=self.locale
+                )
+        except SendMailException:
+            pass  # Already logged
+
     @scopes_disabled()
     def assign_identifier(self):
         charset = list('ABCDEFGHJKLMNPQRSTUVWXYZ23456789')
@@ -276,12 +300,12 @@ class Customer(LoggedModel):
 
     def send_activation_mail(self):
         from pretix.base.services.mail import mail
-        from pretix.multidomain.urlreverse import build_absolute_uri
+        from pretix.multidomain.urlreverse import eventreverse_absolute
         from pretix.presale.forms.customer import TokenGenerator
 
         ctx = self.get_email_context()
         token = TokenGenerator().make_token(self)
-        ctx['url'] = build_absolute_uri(
+        ctx['url'] = eventreverse_absolute(
             self.organizer,
             'presale:organizer.customer.activate'
         ) + '?id=' + self.identifier + '&token=' + token
@@ -293,6 +317,7 @@ class Customer(LoggedModel):
             locale=self.locale,
             customer=self,
             organizer=self.organizer,
+            sensitive=True,
         )
 
     def usable_gift_cards(self, used_cards=[]):
@@ -349,7 +374,7 @@ class AttendeeProfile(models.Model):
     def state_name(self):
         sd = pycountry.subdivisions.get(code='{}-{}'.format(self.country, self.state))
         if sd:
-            return sd.name
+            return _(sd.name)
         return self.state
 
     @property
@@ -371,7 +396,7 @@ class AttendeeProfile(models.Model):
             self.company,
             self.street,
             (self.zipcode or '') + ' ' + (self.city or '') + ' ' + (self.state_for_address or ''),
-            self.country.name,
+            self.country.name if self.country else None,
         ]
         for a in self.answers:
             value = a.get('value')
@@ -384,6 +409,17 @@ class AttendeeProfile(models.Model):
             parts.append(f'{a["field_label"]}: {val}')
 
         return '\n'.join([str(p).strip() for p in parts if p and str(p).strip()])
+
+    @cached_property
+    def answers_key_to_index(self):
+        return {a.get('field_name'): i for i, a in enumerate(self.answers)}
+
+    def store_answer(self, answer_dict):
+        k = answer_dict['field_name']
+        if k in self.answers_key_to_index:
+            self.answers[self.answers_key_to_index[k]] = answer_dict
+        else:
+            self.answers.append(answer_dict)
 
 
 def generate_client_id():

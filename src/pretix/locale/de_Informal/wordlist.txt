@@ -32,6 +32,7 @@ ausgecheckt
 ausgeklappt
 auswahl
 Authentication
+Authenticator
 Authenticator-App
 Autorisierungscode
 Autorisierungs-Endpunktes
@@ -73,6 +74,7 @@ Bokmål
 Boleto
 Branding-Informationen
 Browsereinstellungen
+Browserfenster
 BSD-Lizenz
 bspw
 Bundles
@@ -92,6 +94,8 @@ Checkout
 Chrome
 Client-ID
 Client-Secret
+CNAME
+CNAME-Eintrag
 CODE.txt
 Community-Übersetzungen
 CONFIRM
@@ -121,6 +125,11 @@ Debug-Modus
 dekodi
 Desktop-Apps
 Di
+DKIM
+DKIM-Eintrag
+DKIM-Schlüssel
+DMARC
+DMARC-Eintrag
 Do
 Downloadformat
 Dr
@@ -130,8 +139,10 @@ Eingangsscan
 Einlassbuchung
 Einlassdatum
 Einlasskontrolle
+Einmalpasswörter
 einzuchecken
 email
+E-Mail-App
 E-Mail-Renderer
 Enterprise-Lizenz
 Enterprise-Lizenzen
@@ -148,8 +159,10 @@ Erstattungsstatus
 Erstattungsweg
 erstmalig
 etc
+EU-USt-ID
 EU-USt-ID-Nr
 Event
+Event-Absage
 Event-Eigenschaft
 Eventeingang
 Event-Erstellung
@@ -163,10 +176,12 @@ Explorer
 FA
 Favicon
 F-Droid
+freeOTP
 Footer
 Footer-Link
 Footer-Text
 Galicisch
+GBP
 Geocoding
 Geocoding-Daten
 Geo-Koordinaten
@@ -202,6 +217,7 @@ innenname
 innennamen
 innergemeinschaftliche
 Innergemeinschaftlicher
+Instagram
 Installations-ID
 Integrationen
 invalidieren
@@ -223,6 +239,7 @@ Linktext
 lit
 Log-ID
 Logindaten
+Loginvorgangs
 Macau
 MapQuest-API-Key
 max
@@ -255,6 +272,7 @@ NFC-Chip
 NFC-Chips
 NFC-Medien
 NFC-Zahlungsmitteln
+NIF
 Nr
 NREI
 number
@@ -263,6 +281,8 @@ Objekt-IDs
 Offline-Scan
 OK
 Online-Banking
+Online-Banking-Nutzer
+Onlinebanking
 Onlinebanking-Zugangsdaten
 Open
 OpenCage-API-Key
@@ -274,6 +294,7 @@ Pago
 parsen
 Pay
 PayPal
+PayPals
 PayPal-Account
 PayPal-Accounts
 PayPal-Konto
@@ -292,8 +313,10 @@ Peppol-Netzwerk
 Peppol-Teilnehmer-ID
 Peppol-Teilnehmer-IDs
 Personalisierung
+P.IVA
 PKCE-Erweiterung
 Platzhalterzeichen
+PLN
 Play
 Plugin
 Plugins
@@ -319,6 +342,7 @@ pretix-Kontos
 pretix-Logo
 pretix-Logos
 pretix-Plugins
+pretixPOS
 pretixPRINT
 pretixPRINT-Version
 pretixSCAN
@@ -330,6 +354,9 @@ pretix-Versionen
 pretix-Widget
 Produkt-ID
 Produkt-Metadaten
+PromptPay
+PromptPay-QR-Code
+PromptPay-Zahlung
 Przelewy
 pt
 px
@@ -438,6 +465,7 @@ Strong
 Swish
 systemweiten
 Tab
+Tabs
 tag
 Teammitglied
 Teamname
@@ -449,6 +477,7 @@ Ticketing
 Ticketing-Firma
 Ticket-Output
 Ticket-QR-Code
+TIN
 TODO
 To-Do-Liste
 TOTP
@@ -531,6 +560,9 @@ WeChat-Zahlung
 Weiterleitungs-URIs
 Weiterleitungs-URL
 Weiterleitungs-URLs
+Wero
+WERO
+WERO-App
 WhatsApp
 Widget
 Widget-Code
@@ -545,6 +577,7 @@ Zahlungs-ID
 Zahlungspflichtig
 Zehnerkarten
 Zeitbasiert
+zeitbasierte
 Zeitslotbuchung
 Zimpler
 ZIP-Datei

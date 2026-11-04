@@ -56,7 +56,6 @@ from pretix.base.models import (
 )
 from pretix.base.payment import PaymentException
 from pretix.base.services.locking import LockTimeoutException
-from pretix.base.services.mail import SendMailException
 from pretix.base.services.orders import change_payment_provider
 from pretix.base.services.tasks import TransactionAwareTask
 from pretix.celery_app import app
@@ -72,13 +71,10 @@ def notify_incomplete_payment(o: Order):
         email_context = get_email_context(event=o.event, order=o, pending_sum=o.pending_sum)
         email_subject = o.event.settings.mail_subject_order_incomplete_payment
 
-        try:
-            o.send_mail(
-                email_subject, email_template, email_context,
-                'pretix.event.order.email.expire_warning_sent'
-            )
-        except SendMailException:
-            logger.exception('Reminder email could not be sent')
+        o.send_mail(
+            email_subject, email_template, email_context,
+            'pretix.event.order.email.expire_warning_sent'
+        )
 
 
 def cancel_old_payments(order):
@@ -288,9 +284,6 @@ def _handle_transaction(trans: BankTransaction, matches: tuple, regex_match_to_s
         except Quota.QuotaExceededException:
             # payment confirmed but order status could not be set, no longer problem of this plugin
             cancel_old_payments(order)
-        except SendMailException:
-            # payment confirmed but order status could not be set, no longer problem of this plugin
-            cancel_old_payments(order)
         else:
             cancel_old_payments(order)
 
@@ -412,7 +405,7 @@ def process_banktransfers(self, job: int, data: list) -> None:
                         # We need to sort prefixes by length with long ones first. In case we have an event with slug
                         # "CONF" and one with slug "CONF2022", we want CONF2022 to match first, to avoid the parser
                         # thinking "2022" is already the order code.
-                        "|".join(sorted([re.escape(p).replace("\\-", r"[\- ]*") for p in prefixes], key=lambda p: len(p), reverse=True)),
+                        "|".join([re.escape(p).replace("\\-", r"[\- ]*") for p in sorted(prefixes, key=lambda p: len(p), reverse=True)]),
                         min(code_len_agg['min'] or 1, inr_len_agg['min'] or 1),
                         max(code_len_agg['max'] or 5, inr_len_agg['max'] or 5)
                     )

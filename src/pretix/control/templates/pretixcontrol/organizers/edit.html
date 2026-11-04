@@ -34,6 +34,7 @@
                         {% endif %}
                         {% bootstrap_field sform.imprint_url layout="control" %}
                         {% bootstrap_field sform.contact_mail layout="control" %}
+                        {% bootstrap_field sform.contact_url layout="control" %}
                         {% bootstrap_field sform.organizer_info_text layout="control" %}
                         {% bootstrap_field sform.event_team_provisioning layout="control" %}
                         {% if sform.allowed_restricted_plugins %}
@@ -132,6 +133,7 @@
                         <legend>{% trans "Customer accounts" %}</legend>
                         {% bootstrap_field sform.customer_accounts layout="control" %}
                         {% bootstrap_field sform.customer_accounts_native layout="control" %}
+                        {% bootstrap_field sform.customer_accounts_require_login_for_order_access layout="control" %}
                         {% bootstrap_field sform.customer_accounts_link_by_email layout="control" %}
                         {% bootstrap_field sform.name_scheme layout="control" %}
                         {% bootstrap_field sform.name_scheme_titles layout="control" %}
@@ -221,6 +223,7 @@
                     <fieldset>
                         <legend>{% trans "Reusable media" %}</legend>
                         {% bootstrap_field sform.reusable_media_active layout="control" %}
+                        {% bootstrap_field sform.reusable_media_usage_enforced layout="control" %}
                         <div data-display-dependency="#{{ sform.reusable_media_active.id_for_label }}">
 
                             <div class="panel panel-default">

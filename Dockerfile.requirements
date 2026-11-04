@@ -1,7 +1,8 @@
 ARG TARGETPLATFORM=linux/amd64
-FROM --platform=${TARGETPLATFORM} python:3.11-bookworm
+FROM --platform=${TARGETPLATFORM} python:3.13-trixie
 
-RUN apt-get update && \
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+    apt-get update && \
     apt-get install -y --no-install-recommends \
             build-essential \
             gettext \
@@ -22,8 +23,7 @@ RUN apt-get update && \
             libmaxminddb0 \
             libmaxminddb-dev \
             zlib1g-dev \
-            nodejs  \
-            npm && \
+            nodejs && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* && \
     dpkg-reconfigure locales &&  \
@@ -32,6 +32,7 @@ RUN apt-get update && \
     mkdir /etc/pretix && \
     mkdir /data && \
     useradd -ms /bin/bash -d /pretix -u 15371 pretixuser && \
+    chmod 0755 /pretix && \
     echo 'pretixuser ALL=(ALL) NOPASSWD:SETENV: /usr/bin/supervisord' >> /etc/sudoers && \
     mkdir /static && \
     mkdir /etc/supervisord
@@ -47,15 +48,19 @@ COPY deployment/docker/supervisord.web.conf /etc/supervisord.web.conf
 COPY deployment/docker/nginx.conf /etc/nginx/nginx.conf
 COPY deployment/docker/nginx-max-body-size.conf /etc/nginx/conf.d/nginx-max-body-size.conf
 COPY deployment/docker/production_settings.py /pretix/src/production_settings.py
+COPY deployment/docker/patch_ticket_transfer.py /usr/local/bin/patch_ticket_transfer.py
 COPY pyproject.toml /pretix/pyproject.toml
 COPY _build /pretix/_build
 COPY src /pretix/src
+COPY package.json /pretix/package.json
+COPY package-lock.json /pretix/package-lock.json
+COPY tsconfig.json /pretix/tsconfig.json
+COPY vite.config.ts /pretix/vite.config.ts
 
 # Install pretix core
 RUN pip3 install -U \
         pip \
-        setuptools \
-        wheel && \
+        setuptools && \
     cd /pretix && \
     PRETIX_DOCKER_BUILD=TRUE pip3 install \
         -e ".[memcached]" \
@@ -80,11 +85,8 @@ RUN if [ -f /pretix/plugins-requirements.txt ]; then \
 
 # Fix pretix-ticket-transfer compatibility issue
 # The _payment_fee_diff() method was removed from OrderChangeManager in newer pretix versions
-# Add it as a no-op method since payment fees are recalculated in _recalculate_total_and_payment_fee()
-RUN python3 -c "import re, os; f='/usr/local/lib/python3.11/site-packages/pretix_ticket_transfer/user_split.py'; \
-    os.path.exists(f) and open(f, 'r+').write(re.sub(r'(class TicketTransferChangeManager\(OrderChangeManager\):.*?)(\n    def commit\(self, check_quotas=True\):)', \
-    r'\1\n    def _payment_fee_diff(self):\n        \"\"\"No-op method - payment fees are recalculated in _recalculate_total_and_payment_fee()\"\"\"\n        pass\2', \
-    open(f).read(), flags=re.DOTALL)) if 'def _payment_fee_diff(self):' not in open(f).read() else None" || true
+# Add it as a no-op method since payment fees are recalculated in _recalculate_rounding_total_and_payment_fee()
+RUN python3 /usr/local/bin/patch_ticket_transfer.py || true
 
 RUN chmod +x /usr/local/bin/pretix && \
     rm /etc/nginx/sites-enabled/default && \
@@ -99,4 +101,3 @@ VOLUME ["/etc/pretix", "/data"]
 EXPOSE 80
 ENTRYPOINT ["pretix"]
 CMD ["all"]
-

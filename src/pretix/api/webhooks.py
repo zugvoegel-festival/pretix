@@ -174,6 +174,38 @@ class ParametrizedEventWebhookEvent(ParametrizedWebhookEvent):
         }
 
 
+class ParametrizedGiftcardWebhookEvent(ParametrizedWebhookEvent):
+    def build_payload(self, logentry: LogEntry):
+        giftcard = logentry.content_object
+        if not giftcard:
+            return None
+
+        return {
+            'notification_id': logentry.pk,
+            'issuer_id': logentry.organizer_id,
+            'issuer_slug': logentry.organizer.slug,
+            'giftcard': giftcard.pk,
+            'action': logentry.action_type,
+        }
+
+
+class ParametrizedGiftcardTransactionWebhookEvent(ParametrizedWebhookEvent):
+    def build_payload(self, logentry: LogEntry):
+        giftcard = logentry.content_object
+        if not giftcard:
+            return None
+
+        return {
+            'notification_id': logentry.pk,
+            'issuer_id': logentry.organizer_id,
+            'issuer_slug': logentry.organizer.slug,
+            'acceptor_id': logentry.parsed_data.get('acceptor_id'),
+            'acceptor_slug': logentry.parsed_data.get('acceptor_slug'),
+            'giftcard': giftcard.pk,
+            'action': logentry.action_type,
+        }
+
+
 class ParametrizedVoucherWebhookEvent(ParametrizedWebhookEvent):
 
     def build_payload(self, logentry: LogEntry):
@@ -376,6 +408,12 @@ def register_default_webhook_events(sender, **kwargs):
             _('This includes product added or deleted and changes to nested objects like '
               'variations or bundles.'),
         ),
+        ParametrizedItemWebhookEvent(
+            'pretix.event.quota.*',
+            _('Quota changed'),
+            _('This includes related events like creation, deletion, opening or closing of quotas. '
+              'No webhook is sent for changes to the resulting availability.'),
+        ),
         ParametrizedEventWebhookEvent(
             'pretix.event.live.activated',
             _('Shop taken live'),
@@ -433,6 +471,18 @@ def register_default_webhook_events(sender, **kwargs):
             'pretix.customer.anonymized',
             _('Customer account anonymized'),
         ),
+        ParametrizedGiftcardWebhookEvent(
+            'pretix.giftcards.created',
+            _('Gift card added'),
+        ),
+        ParametrizedGiftcardWebhookEvent(
+            'pretix.giftcards.modified',
+            _('Gift card modified'),
+        ),
+        ParametrizedGiftcardTransactionWebhookEvent(
+            'pretix.giftcards.transaction.*',
+            _('Gift card used in transaction'),
+        )
     )
 
 

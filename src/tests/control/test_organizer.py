@@ -24,17 +24,13 @@ from smtplib import SMTPResponseException
 
 import pytest
 import responses
+from django.conf import settings
 from django.db import transaction
 from django.test.utils import override_settings
 from django_scopes import scopes_disabled
 from tests.base import SoupTest, extract_form_fields
 
-from pretix.base.models import Event, Organizer, Team, User
-
-
-@pytest.fixture
-def class_monkeypatch(request, monkeypatch):
-    request.cls.monkeypatch = monkeypatch
+from pretix.base.models import Event, Organizer, OutgoingMail, Team, User
 
 
 @pytest.mark.usefixtures("class_monkeypatch")
@@ -51,8 +47,7 @@ class OrganizerTest(SoupTest):
             plugins='pretix.plugins.banktransfer,tests.testdummy'
         )
 
-        t = Team.objects.create(organizer=self.orga1, can_create_events=True, can_change_event_settings=True,
-                                can_change_items=True, can_change_organizer_settings=True)
+        t = Team.objects.create(organizer=self.orga1, all_organizer_permissions=True, all_event_permissions=True)
         t.members.add(self.user)
         t.limit_events.add(self.event1)
 
@@ -165,6 +160,22 @@ class OrganizerTest(SoupTest):
         assert "mail_from" not in self.orga1.settings._cache()
 
     @staticmethod
+    def _fake_dmarc_record(hostname):
+        return {
+            'test.pretix.dev': 'v=DMARC1; p=quarantine; sp=none; adkim=r; aspf=r;',
+            'bad.pretix.dev': None,
+            'none.pretix.dev': None,
+        }[hostname]
+
+    @staticmethod
+    def _fake_cname_record(hostname):
+        return {
+            'pretix._domainkey.test.pretix.dev': 'test-pretix-dev.dkim.pretix.eu.',
+            'pretix._domainkey.bad.pretix.dev': 'example.org',
+            'pretix._domainkey.none.pretix.dev': None,
+        }[hostname]
+
+    @staticmethod
     def _fake_spf_record(hostname):
         return {
             'test.pretix.dev': 'v=spf1 a mx include:level2.pretix.dev ~all',
@@ -177,9 +188,17 @@ class OrganizerTest(SoupTest):
             'spftest.pretix.dev': None,
         }[hostname]
 
-    @override_settings(MAIL_CUSTOM_SENDER_VERIFICATION_REQUIRED=False, MAIL_CUSTOM_SENDER_SPF_STRING="include:spftest.pretix.dev include:test2.pretix.dev")
-    def test_email_setup_no_verification_spf_success(self):
+    @override_settings(
+        MAIL_CUSTOM_SENDER_VERIFICATION_REQUIRED=False,
+        MAIL_CUSTOM_SENDER_SPF_STRING="include:spftest.pretix.dev include:test2.pretix.dev",
+        MAIL_CUSTOM_SENDER_DKIM_SELECTOR="pretix",
+        MAIL_CUSTOM_SENDER_DKIM_CNAME="dkim.pretix.eu.",
+        MAIL_CUSTOM_SENDER_DMARC_REQUIRED=True,
+    )
+    def test_email_setup_no_verification_spf_dmarc_dkim_success(self):
         self.monkeypatch.setattr("pretix.control.views.mailsetup.get_spf_record", OrganizerTest._fake_spf_record)
+        self.monkeypatch.setattr("pretix.control.views.mailsetup.get_cname_record", OrganizerTest._fake_cname_record)
+        self.monkeypatch.setattr("pretix.control.views.mailsetup.get_dmarc_record", OrganizerTest._fake_dmarc_record)
         doc = self.post_doc(
             '/control/organizer/%s/settings/email/setup' % self.orga1.slug,
             {
@@ -210,6 +229,43 @@ class OrganizerTest(SoupTest):
             {
                 'mode': 'simple',
                 'simple-mail_from': 'test@test.pretix.dev',
+            },
+            follow=True
+        )
+        assert doc.select('.alert-danger')
+        self.orga1.settings.flush()
+        # not yet saved
+        assert "mail_from" not in self.orga1.settings._cache()
+
+    @override_settings(MAIL_CUSTOM_SENDER_VERIFICATION_REQUIRED=False,
+                       MAIL_CUSTOM_SENDER_DKIM_SELECTOR="pretix",
+                       MAIL_CUSTOM_SENDER_DKIM_CNAME="dkim.pretix.eu.",
+                       MAIL_CUSTOM_SENDER_SPF_STRING="")
+    def test_email_setup_no_verification_dkim_warning(self):
+        self.monkeypatch.setattr("pretix.control.views.mailsetup.get_cname_record", OrganizerTest._fake_cname_record)
+        doc = self.post_doc(
+            '/control/organizer/%s/settings/email/setup' % self.orga1.slug,
+            {
+                'mode': 'simple',
+                'simple-mail_from': 'test@bad.pretix.dev',
+            },
+            follow=True
+        )
+        assert doc.select('.alert-danger')
+        self.orga1.settings.flush()
+        # not yet saved
+        assert "mail_from" not in self.orga1.settings._cache()
+
+    @override_settings(MAIL_CUSTOM_SENDER_VERIFICATION_REQUIRED=False,
+                       MAIL_CUSTOM_SENDER_DMARC_REQUIRED=True,
+                       MAIL_CUSTOM_SENDER_SPF_STRING="")
+    def test_email_setup_no_verification_dmarc_warning(self):
+        self.monkeypatch.setattr("pretix.control.views.mailsetup.get_dmarc_record", OrganizerTest._fake_dmarc_record)
+        doc = self.post_doc(
+            '/control/organizer/%s/settings/email/setup' % self.orga1.slug,
+            {
+                'mode': 'simple',
+                'simple-mail_from': 'test@bad.pretix.dev',
             },
             follow=True
         )
@@ -453,3 +509,111 @@ class OrganizerTest(SoupTest):
         self.event1.refresh_from_db()
         assert 'pretix.plugins.banktransfer' not in self.event1.get_plugins()
         assert 'pretix.plugins.stripe' in self.event1.get_plugins()
+
+    def test_outgoing_mails_list_and_detail(self):
+        m1 = OutgoingMail.objects.create(
+            organizer=self.orga1,
+            to=['rightrecipient@example.com'],
+            subject='Test',
+            body_plain='Test',
+            sender='sender@example.com',
+            headers={},
+        )
+        m2 = OutgoingMail.objects.create(
+            organizer=self.orga2,
+            to=['wrongrecipient@example.com'],
+            subject='Test',
+            body_plain='Test',
+            sender='sender@example.com',
+            headers={},
+        )
+        resp = self.client.get('/control/organizer/%s/outgoingmails' % self.orga1.slug)
+        assert resp.status_code == 200
+        assert b"rightrecipient@example.com" in resp.content
+        assert b"wrongrecipient@example.com" not in resp.content
+
+        resp = self.client.get('/control/organizer/%s/outgoingmails?status=queued' % self.orga1.slug)
+        assert resp.status_code == 200
+        assert b"rightrecipient@example.com" in resp.content
+        resp = self.client.get('/control/organizer/%s/outgoingmails?status=sent' % self.orga1.slug)
+        assert resp.status_code == 200
+        assert b"rightrecipient@example.com" not in resp.content
+
+        if 'postgresql' in settings.DATABASES['default']['ENGINE']:
+            resp = self.client.get('/control/organizer/%s/outgoingmails?query=RIGHTrecipient@example.com' % self.orga1.slug)
+            assert resp.status_code == 200
+            assert b"rightrecipient@example.com" in resp.content
+            resp = self.client.get('/control/organizer/%s/outgoingmails?query=wrongrecipient@example.com' % self.orga1.slug)
+            assert resp.status_code == 200
+            assert b"rightrecipient@example.com" not in resp.content
+
+        resp = self.client.get('/control/organizer/%s/outgoingmail/%d/' % (self.orga1.slug, m1.pk))
+        assert resp.status_code == 200
+        assert b"rightrecipient@example.com" in resp.content
+
+        resp = self.client.get('/control/organizer/%s/outgoingmail/%d/' % (self.orga1.slug, m2.pk))
+        assert resp.status_code == 404
+
+    def test_outgoing_mails_retry(self):
+        m1 = OutgoingMail.objects.create(
+            organizer=self.orga1,
+            status=OutgoingMail.STATUS_SENT,
+            to=['rightrecipient@example.com'],
+            subject='Test',
+            body_plain='Test',
+            sender='sender@example.com',
+            headers={},
+        )
+        m2 = OutgoingMail.objects.create(
+            organizer=self.orga1,
+            status=OutgoingMail.STATUS_FAILED,
+            to=['rightrecipient@example.com'],
+            subject='Test',
+            body_plain='Test',
+            sender='sender@example.com',
+            headers={},
+        )
+        resp = self.client.post(
+            '/control/organizer/%s/outgoingmail/bulk_action' % self.orga1.slug,
+            data={
+                "action": "retry",
+                "outgoingmail": [m1.pk, m2.pk]
+            }
+        )
+        assert resp.status_code == 302
+        m1.refresh_from_db()
+        m2.refresh_from_db()
+        assert m1.status == OutgoingMail.STATUS_SENT
+        assert m2.status in (OutgoingMail.STATUS_SENT, OutgoingMail.STATUS_QUEUED)
+
+    def test_outgoing_mails_abort(self):
+        m1 = OutgoingMail.objects.create(
+            organizer=self.orga1,
+            status=OutgoingMail.STATUS_SENT,
+            to=['rightrecipient@example.com'],
+            subject='Test',
+            body_plain='Test',
+            sender='sender@example.com',
+            headers={},
+        )
+        m2 = OutgoingMail.objects.create(
+            organizer=self.orga1,
+            status=OutgoingMail.STATUS_QUEUED,
+            to=['rightrecipient@example.com'],
+            subject='Test',
+            body_plain='Test',
+            sender='sender@example.com',
+            headers={},
+        )
+        resp = self.client.post(
+            '/control/organizer/%s/outgoingmail/bulk_action' % self.orga1.slug,
+            data={
+                "action": "abort",
+                "__ALL": "on",
+            }
+        )
+        assert resp.status_code == 302
+        m1.refresh_from_db()
+        m2.refresh_from_db()
+        assert m1.status == OutgoingMail.STATUS_SENT
+        assert m2.status == OutgoingMail.STATUS_ABORTED

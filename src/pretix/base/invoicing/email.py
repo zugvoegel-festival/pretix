@@ -33,8 +33,7 @@ from pretix.base.invoicing.transmission import (
     transmission_types,
 )
 from pretix.base.models import Invoice, InvoiceAddress
-from pretix.base.services.mail import SendMailException, mail, render_mail
-from pretix.helpers.format import format_map
+from pretix.base.services.mail import mail
 
 
 @transmission_types.new()
@@ -72,8 +71,8 @@ class EmailTransmissionType(TransmissionType):
 
     def transmission_info_to_form_data(self, transmission_info: dict) -> dict:
         return {
-            "transmission_email_other": bool(transmission_info.get("transmission_email_address")),
-            "transmission_email_address": transmission_info.get("transmission_email_address"),
+            "transmission_email_other": bool((transmission_info or {}).get("transmission_email_address")),
+            "transmission_email_address": (transmission_info or {}).get("transmission_email_address"),
         }
 
     def form_data_to_transmission_info(self, form_data: dict) -> dict:
@@ -133,41 +132,26 @@ class EmailTransmissionProvider(TransmissionProvider):
             template = invoice.order.event.settings.get('mail_text_order_invoice', as_type=LazyI18nString)
             subject = invoice.order.event.settings.get('mail_subject_order_invoice', as_type=LazyI18nString)
 
-            try:
-                # Do not set to completed because that is done by the email sending task
-                subject = format_map(subject, context)
-                email_content = render_mail(template, context)
-                mail(
-                    [recipient],
-                    subject,
-                    template,
-                    context=context,
-                    event=invoice.order.event,
-                    locale=invoice.order.locale,
-                    order=invoice.order,
-                    invoices=[invoice],
-                    attach_tickets=False,
-                    auto_email=True,
-                    attach_ical=False,
-                    plain_text_only=True,
-                    no_order_links=True,
-                )
-            except SendMailException:
-                raise
-            else:
+            # Do not set to completed because that is done by the email sending task
+            outgoing_mail = mail(
+                [recipient],
+                subject,
+                template,
+                context=context,
+                event=invoice.order.event,
+                locale=invoice.order.locale,
+                order=invoice.order,
+                invoices=[invoice],
+                attach_tickets=False,
+                auto_email=True,
+                attach_ical=False,
+                plain_text_only=True,
+                no_order_links=True,
+            )
+            if outgoing_mail:
                 invoice.order.log_action(
                     'pretix.event.order.email.invoice',
                     user=None,
                     auth=None,
-                    data={
-                        'subject': subject,
-                        'message': email_content,
-                        'position': None,
-                        'recipient': recipient,
-                        'invoices': [invoice.pk],
-                        'attach_tickets': False,
-                        'attach_ical': False,
-                        'attach_other_files': [],
-                        'attach_cached_files': [],
-                    }
+                    data=outgoing_mail.log_data()
                 )

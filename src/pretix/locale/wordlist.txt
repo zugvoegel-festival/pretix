@@ -10,7 +10,9 @@ analytics
 anonymize
 anonymized
 Auth
+authentification
 authenticator
+Authenticator
 automatical
 availabilities
 backend
@@ -21,6 +23,7 @@ barcodes
 Bcc
 BCC
 BezahlCode
+biometric
 BLIK
 blocklist
 BN
@@ -31,6 +34,7 @@ Ceuta
 chardet
 chargebacks
 checkboxes
+CNAME
 CONFIRM
 cronjob
 cryptographic
@@ -45,7 +49,9 @@ CZK
 datetime
 dekodi
 deliverability
+DKIM
 DSS
+DMARC
 DNS
 EEA
 eInvoices
@@ -55,9 +61,11 @@ EPS
 eps
 favicon
 filetype
+freeOTP
 frontend
 frontpage
 Galician
+GBP
 GENEXAMPLE
 Geo
 geo
@@ -73,6 +81,7 @@ IBANs
 iCal
 ics
 iDEAL
+Instagram
 Itaú
 integrations
 intra
@@ -99,6 +108,7 @@ Mx
 MyBank
 multiline
 NFC
+NIF
 NREI
 NXP
 OpenCage
@@ -107,10 +117,12 @@ OpenStreetMap
 overpayment
 OXXO
 Pago
+PayPals
 PayU
 Peppol
 PCI
 PKCE
+PLN
 PDFs
 percentual
 personalization
@@ -126,6 +138,7 @@ pretixdroid
 pretixPOS
 pretixPRINT
 pretixSCAN
+PromptPay
 Przelewy
 Pseudonymization
 px
@@ -183,6 +196,8 @@ webhooks
 webserver
 Wechat
 WeChat
+Wero
+WERO
 WhatsApp
 whitespace
 xlsx
