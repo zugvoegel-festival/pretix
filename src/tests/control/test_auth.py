@@ -42,8 +42,10 @@ from django.contrib.auth.tokens import (
 )
 from django.core import mail as djmail
 from django.test import RequestFactory, TestCase, override_settings
+from django.utils.crypto import get_random_string
 from django.utils.timezone import now
 from django_otp.oath import TOTP
+from django_otp.plugins.otp_static.models import StaticDevice
 from django_otp.plugins.otp_totp.models import TOTPDevice
 from webauthn.authentication.verify_authentication_response import (
     VerifiedAuthentication,
@@ -383,11 +385,6 @@ class RegistrationFormTest(TestCase):
         self.assertEqual(response.status_code, 403)
 
 
-@pytest.fixture
-def class_monkeypatch(request, monkeypatch):
-    request.cls.monkeypatch = monkeypatch
-
-
 @pytest.mark.usefixtures("class_monkeypatch")
 class Login2FAFormTest(TestCase):
 
@@ -492,34 +489,23 @@ class Login2FAFormTest(TestCase):
 
         m.undo()
 
+    def test_recovery_code_valid(self):
+        djmail.outbox = []
+        d, __ = StaticDevice.objects.get_or_create(user=self.user, name='emergency')
+        token = d.token_set.create(token=get_random_string(length=12, allowed_chars='1234567890'))
 
-class FakeRedis(object):
-    def get_redis_connection(self, connection_string):
-        return self
-
-    def __init__(self):
-        self.storage = {}
-
-    def pipeline(self):
-        return self
-
-    def hincrbyfloat(self, rkey, key, amount):
-        return self
-
-    def commit(self):
-        return self
-
-    def exists(self, rkey):
-        return rkey in self.storage
-
-    def setex(self, rkey, value, expiration):
-        self.storage[rkey] = value
-
-    def execute(self):
-        pass
+        response = self.client.get('/control/login/2fa')
+        assert 'token' in response.content.decode()
+        response = self.client.post('/control/login/2fa', {
+            'token': token.token,
+        })
+        self.assertEqual(response.status_code, 302)
+        self.assertIn('/control/', response['Location'])
+        assert "recovery code" in djmail.outbox[0].body
 
 
 @pytest.mark.usefixtures("class_monkeypatch")
+@pytest.mark.usefixtures("fakeredis_client")
 class PasswordRecoveryFormTest(TestCase):
     def setUp(self):
         super().setUp()
@@ -549,11 +535,6 @@ class PasswordRecoveryFormTest(TestCase):
 
     @override_settings(HAS_REDIS=True)
     def test_email_reset_twice_redis(self):
-        fake_redis = FakeRedis()
-        m = self.monkeypatch
-        m.setattr('django_redis.get_redis_connection', fake_redis.get_redis_connection, raising=False)
-        m.setattr('pretix.base.metrics.redis', fake_redis, raising=False)
-
         djmail.outbox = []
 
         response = self.client.post('/control/forgot', {
@@ -1107,7 +1088,7 @@ class Obligatory2FATest(TestCase):
         session.save()
 
         organizer = Organizer.objects.create(name='Dummy', slug='dummy')
-        team = Team.objects.create(organizer=organizer, can_change_teams=True, name='Admin team')
+        team = Team.objects.create(organizer=organizer, all_event_permissions=True, name='Admin team')
         team.members.add(self.user)
         self.user.require_2fa = False
         self.user.save()

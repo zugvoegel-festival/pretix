@@ -36,6 +36,7 @@
 import datetime
 import re
 from decimal import Decimal
+from importlib import import_module
 from json import loads
 from zoneinfo import ZoneInfo
 
@@ -46,6 +47,7 @@ from django.core.exceptions import ValidationError
 from django.test import TestCase
 from django.utils.timezone import now
 from django_scopes import scopes_disabled
+from freezegun import freeze_time
 from tests.base import SoupTest
 from tests.testdummy.signals import FoobarSalesChannel
 
@@ -69,7 +71,7 @@ class EventTestMixin:
             live=True,
         )
         self.user = User.objects.create_user('dummy@dummy.dummy', 'dummy')
-        t = Team.objects.create(organizer=self.orga, can_change_event_settings=True)
+        t = Team.objects.create(organizer=self.orga, all_event_permissions=True)
         t.members.add(self.user)
         t.limit_events.add(self.event)
 
@@ -78,6 +80,44 @@ class EventMiddlewareTest(EventTestMixin, SoupTest):
     def test_event_header(self):
         doc = self.get_doc('/%s/%s/' % (self.orga.slug, self.event.slug))
         self.assertIn(str(self.event.name), doc.find("h1").text)
+
+    def test_footer_contact_url_overrides_mailto(self):
+        self.event.settings.contact_mail = 'orga@example.org'
+        self.event.settings.contact_url = 'https://example.org/contact'
+
+        doc = self.get_doc('/%s/%s/' % (self.orga.slug, self.event.slug))
+        contact_link = doc.find('a', string='Contact')
+
+        self.assertIsNotNone(contact_link)
+        self.assertTrue(contact_link['href'].startswith('/redirect/?url=https%3A//example.org/contact'))
+
+    def test_no_session_cookie_set_on_event_index_view(self):
+        resp = self.client.get('/%s/%s/' % (self.orga.slug, self.event.slug))
+        self.assertEqual(resp.status_code, 200)
+        assert settings.SESSION_COOKIE_NAME not in self.client.cookies
+
+    def test_no_cart_session_added_on_event_index_view(self):
+        # Make sure a session is present by doing a cart op on another event
+        event2 = Event.objects.create(
+            organizer=self.orga, name='30C3b', slug='30c3b',
+            date_from=datetime.datetime(now().year + 1, 12, 26, 14, 0, tzinfo=datetime.timezone.utc),
+            live=True,
+        )
+        self.client.post('/%s/%s/cart/add' % (self.orga.slug, event2.slug), {
+            'item_%d' % 1337: '1',  # item does not need to exist
+            'ajax': 1
+        })
+        assert settings.SESSION_COOKIE_NAME in self.client.cookies
+
+        # Visit shop, make sure no session is created
+        resp = self.client.get('/%s/%s/' % (self.orga.slug, self.event.slug))
+        self.assertEqual(resp.status_code, 200)
+
+        SessionStore = import_module(settings.SESSION_ENGINE).SessionStore
+        session = SessionStore(self.client.cookies[settings.SESSION_COOKIE_NAME].value).load()
+        assert set(session.keys()) == {
+            f"current_cart_event_{event2.pk}", "carts"
+        }
 
     def test_not_found(self):
         resp = self.client.get('/%s/%s/' % ('foo', 'bar'))
@@ -271,6 +311,48 @@ class ItemDisplayTest(EventTestMixin, SoupTest):
             Item.objects.create(event=self.event, name='Early-bird ticket', category=c, default_price=0)
         resp = self.client.get('/%s/%s/' % (self.orga.slug, self.event.slug))
         self.assertNotIn("Early-bird", resp.rendered_content)
+
+    def tiered_availability_by_date_and_quota(self, q1_size, q2_size, time_offset, expected_phase):
+        current_time = now()
+
+        with scopes_disabled():
+            q1 = Quota.objects.create(event=self.event, name='Phase 1', size=q1_size)
+            item1 = Item.objects.create(
+                event=self.event,
+                name='Phase 1',
+                default_price=0,
+                available_from=current_time,
+                available_until=current_time + datetime.timedelta(days=1),
+                available_from_mode=Item.UNAVAIL_MODE_HIDDEN,
+                available_until_mode=Item.UNAVAIL_MODE_HIDDEN,
+                hidden_if_item_available_mode=Item.UNAVAIL_MODE_HIDDEN,
+            )
+            q1.items.add(item1)
+            q2 = Quota.objects.create(event=self.event, name='Phase 2', size=q2_size)
+            item2 = Item.objects.create(
+                event=self.event,
+                name='Phase 2',
+                default_price=0,
+                available_from=current_time + datetime.timedelta(days=0),
+                available_until=current_time + datetime.timedelta(days=2),
+                available_from_mode=Item.UNAVAIL_MODE_HIDDEN,
+                available_until_mode=Item.UNAVAIL_MODE_HIDDEN,
+                hidden_if_item_available_mode=Item.UNAVAIL_MODE_HIDDEN,
+                hidden_if_item_available=item1
+            )
+            q2.items.add(item2)
+            with freeze_time(current_time + time_offset):
+                resp = self.client.get('/%s/%s/' % (self.orga.slug, self.event.slug))
+                self.assertIn(expected_phase, resp.rendered_content)
+
+    def test_tiered_availability_by_date_and_quota_phase1_available(self):
+        self.tiered_availability_by_date_and_quota(1, 1, datetime.timedelta(seconds=1), "Phase 1")
+
+    def test_tiered_availability_by_date_and_quota_phase1_sold_out(self):
+        self.tiered_availability_by_date_and_quota(0, 1, datetime.timedelta(seconds=1), "Phase 2")
+
+    def test_tiered_availability_by_date_and_quota_phase1_timed_out(self):
+        self.tiered_availability_by_date_and_quota(1, 1, datetime.timedelta(days=1, hours=1), "Phase 2")
 
     def test_subevents_inactive_unknown(self):
         self.event.has_subevents = True
@@ -662,6 +744,35 @@ class ItemDisplayTest(EventTestMixin, SoupTest):
         self.assertNotIn("SOLD OUT", doc.select("section:nth-of-type(1)")[0].text)
         self.assertIn("Late-bird", doc.select("section:nth-of-type(1)")[0].text)
 
+    def test_hidden_if_item_available_variation_unavailable_by_time(self):
+        with scopes_disabled():
+            q = Quota.objects.create(event=self.event, name='Early-bird', size=10)
+            q2 = Quota.objects.create(event=self.event, name='Late-bird', size=10)
+            item_with_vars = Item.objects.create(event=self.event, name='Early-bird ticket', default_price=12)
+            v = item_with_vars.variations.create(
+                value='Regular', active=True,
+            )
+            item2 = Item.objects.create(event=self.event, name='Late-bird ticket', default_price=12,
+                                        hidden_if_item_available=item_with_vars)
+            q.items.add(item_with_vars)
+            q.variations.add(v)
+            q2.items.add(item2)
+
+        self.event.settings.hide_sold_out = True
+        doc = self.get_doc('/%s/%s/' % (self.orga.slug, self.event.slug))
+        self.assertIn("Early-bird", doc.select("section:nth-of-type(1)")[0].text)
+        self.assertNotIn("SOLD OUT", doc.select("section:nth-of-type(1)")[0].text)
+        self.assertNotIn("Late-bird", doc.select("section:nth-of-type(1)")[0].text)
+
+        item_with_vars.available_until = now() - datetime.timedelta(days=3)
+        item_with_vars.available_until_mode = "hide"
+        item_with_vars.save()
+
+        doc = self.get_doc('/%s/%s/' % (self.orga.slug, self.event.slug))
+        self.assertNotIn("Early-bird", doc.select("section:nth-of-type(1)")[0].text)
+        self.assertNotIn("SOLD OUT", doc.select("section:nth-of-type(1)")[0].text)
+        self.assertIn("Late-bird", doc.select("section:nth-of-type(1)")[0].text)
+
     def test_bundle_sold_out(self):
         with scopes_disabled():
             q = Quota.objects.create(event=self.event, name='Quota', size=2)
@@ -802,7 +913,7 @@ class VoucherRedeemItemDisplayTest(EventTestMixin, SoupTest):
         self.q.size = 0
         self.q.save()
         html = self.client.get('/%s/%s/redeem?voucher=%s' % (self.orga.slug, self.event.slug, self.v.code))
-        assert "_voucher_item" not in html.rendered_content
+        assert "_selected_item" not in html.rendered_content
 
     def test_sold_out_blocking(self):
         self.q.size = 0
@@ -810,7 +921,7 @@ class VoucherRedeemItemDisplayTest(EventTestMixin, SoupTest):
         self.v.block_quota = True
         self.v.save()
         html = self.client.get('/%s/%s/redeem?voucher=%s' % (self.orga.slug, self.event.slug, self.v.code))
-        assert "_voucher_item" in html.rendered_content
+        assert "_selected_item" in html.rendered_content
 
     def test_sold_out_ignore(self):
         self.q.size = 0
@@ -818,7 +929,7 @@ class VoucherRedeemItemDisplayTest(EventTestMixin, SoupTest):
         self.v.allow_ignore_quota = True
         self.v.save()
         html = self.client.get('/%s/%s/redeem?voucher=%s' % (self.orga.slug, self.event.slug, self.v.code))
-        assert "_voucher_item" in html.rendered_content
+        assert "_selected_item" in html.rendered_content
 
     def test_variations_sold_out(self):
         with scopes_disabled():
@@ -829,7 +940,7 @@ class VoucherRedeemItemDisplayTest(EventTestMixin, SoupTest):
         self.q.size = 0
         self.q.save()
         html = self.client.get('/%s/%s/redeem?voucher=%s' % (self.orga.slug, self.event.slug, self.v.code))
-        assert "_voucher_item" not in html.rendered_content
+        assert "_selected_item" not in html.rendered_content
 
     def test_variations_sold_out_blocking(self):
         with scopes_disabled():
@@ -842,7 +953,27 @@ class VoucherRedeemItemDisplayTest(EventTestMixin, SoupTest):
         self.v.block_quota = True
         self.v.save()
         html = self.client.get('/%s/%s/redeem?voucher=%s' % (self.orga.slug, self.event.slug, self.v.code))
-        assert "_voucher_item" in html.rendered_content
+        assert "_selected_item" in html.rendered_content
+
+    def test_variation_not_available(self):
+        with scopes_disabled():
+            var1 = ItemVariation.objects.create(item=self.item, value='Red', position=1)
+            var2 = ItemVariation.objects.create(item=self.item, value='Black', position=2, available_from=now() + datetime.timedelta(days=2))
+            var3 = ItemVariation.objects.create(item=self.item, value='Purple', position=3,
+                                                available_from=now() + datetime.timedelta(days=2), available_from_mode=Item.UNAVAIL_MODE_INFO)
+            self.q.variations.add(var1)
+            self.q.variations.add(var2)
+            self.q.variations.add(var3)
+        self.q.size = 0
+        self.q.save()
+        self.v.block_quota = True
+        self.v.save()
+        html = self.client.get('/%s/%s/redeem?voucher=%s' % (self.orga.slug, self.event.slug, self.v.code))
+        assert "_selected_item" in html.rendered_content
+        assert "Black" not in html.rendered_content
+        assert "Red" in html.rendered_content
+        assert "Purple" in html.rendered_content
+        assert "Not available yet" in html.rendered_content
 
     def test_voucher_price(self):
         self.v.value = Decimal("10.00")
@@ -1050,7 +1181,7 @@ class WaitingListTest(EventTestMixin, SoupTest):
     def test_auto_disable(self):
         self.event.settings.set('waiting_list_enabled', True)
         self.event.settings.waiting_list_auto_disable = RelativeDateWrapper(
-            RelativeDate(days=900, time=datetime.time(9, 0, 0), base_date_name='date_from', minutes=None, is_after=False)
+            RelativeDate(days=900, time=datetime.time(9, 0, 0), base_date_name='event__date_from', minutes=None, is_after=False)
         )
         response = self.client.get(
             '/%s/%s/' % (self.orga.slug, self.event.slug)
@@ -1089,6 +1220,65 @@ class WaitingListTest(EventTestMixin, SoupTest):
         assert wle.variation is None
         assert wle.voucher is None
         assert wle.locale == 'en'
+
+    def test_initial_selection(self):
+        with scopes_disabled():
+            cat = ItemCategory.objects.create(event=self.event, name='Tickets')
+            self.item.category = cat
+            self.item.save()
+
+            item2 = Item.objects.create(
+                event=self.event, name='VIP ticket',
+                default_price=Decimal('25.00'),
+                active=True, category=cat,
+            )
+            self.q.items.add(item2)
+
+        response = self.client.get(
+            '/%s/%s/waitinglist/?item=%d' % (
+                self.orga.slug, self.event.slug, item2.pk
+            )
+        )
+        self.assertEqual(response.status_code, 200)
+        doc = BeautifulSoup(response.render().content, "lxml")
+
+        select = doc.find('select', {'name': 'itemvar'})
+        optgroup = select.find('optgroup')
+        self.assertIsNotNone(optgroup, 'Choices should be grouped by category')
+        self.assertEqual(optgroup['label'], 'Tickets')
+
+        selected = select.find_all('option', selected=True)
+        self.assertEqual(len(selected), 1, 'Exactly one option should be pre-selected')
+        self.assertEqual(selected[0]['value'], str(item2.pk))
+
+    def test_initial_selection_with_variation(self):
+        with scopes_disabled():
+            cat = ItemCategory.objects.create(event=self.event, name='Tickets')
+            self.item.category = cat
+            self.item.has_variations = True
+            self.item.save()
+
+            var1 = ItemVariation.objects.create(item=self.item, value='Standard')
+            var2 = ItemVariation.objects.create(item=self.item, value='Premium')
+            self.q.variations.add(var1, var2)
+
+        response = self.client.get(
+            '/%s/%s/waitinglist/?item=%d&var=%d' % (
+                self.orga.slug, self.event.slug,
+                self.item.pk, var2.pk,
+            )
+        )
+        self.assertEqual(response.status_code, 200)
+        doc = BeautifulSoup(response.render().content, "lxml")
+
+        select = doc.find('select', {'name': 'itemvar'})
+        optgroup = select.find('optgroup')
+        self.assertIsNotNone(optgroup, 'Choices should be grouped by category')
+        self.assertEqual(optgroup['label'], 'Tickets')
+
+        selected = select.find_all('option', selected=True)
+        self.assertEqual(len(selected), 1, 'Exactly one option should be pre-selected')
+        self.assertEqual(selected[0]['value'], '%d-%d' % (self.item.pk, var2.pk))
 
     def test_subevent_valid(self):
         with scopes_disabled():

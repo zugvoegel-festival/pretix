@@ -60,6 +60,9 @@ The following values for ``action_types`` are valid with pretix core:
     * ``pretix.event.added``
     * ``pretix.event.changed``
     * ``pretix.event.deleted``
+    * ``pretix.giftcards.created``
+    * ``pretix.giftcards.modified``
+    * ``pretix.giftcards.transaction.*``
     * ``pretix.voucher.added``
     * ``pretix.voucher.changed``
     * ``pretix.voucher.deleted``
@@ -67,6 +70,7 @@ The following values for ``action_types`` are valid with pretix core:
     * ``pretix.subevent.changed``
     * ``pretix.subevent.deleted``
     * ``pretix.event.item.*``
+    * ``pretix.event.quota.*``
     * ``pretix.event.live.activated``
     * ``pretix.event.live.deactivated``
     * ``pretix.event.testmode.activated``

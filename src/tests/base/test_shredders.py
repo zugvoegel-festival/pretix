@@ -31,7 +31,7 @@ from django_scopes import scope
 
 from pretix.base.models import (
     CachedCombinedTicket, CachedTicket, Event, InvoiceAddress, Order,
-    OrderPayment, OrderPosition, Organizer, QuestionAnswer,
+    OrderPayment, OrderPosition, Organizer, OutgoingMail, QuestionAnswer,
 )
 from pretix.base.services.invoices import generate_invoice, invoice_pdf_task
 from pretix.base.services.tickets import generate
@@ -111,6 +111,15 @@ def test_email_shredder(event, order):
             'new_email': 'foo@bar.com',
         }
     )
+    m = OutgoingMail.objects.create(
+        event=event,
+        order=order,
+        to=['recipient@example.com'],
+        subject='Test',
+        body_plain='Test',
+        sender='sender@example.com',
+        headers={},
+    )
 
     s = EmailAddressShredder(event)
     f = list(s.generate_files())
@@ -129,6 +138,7 @@ def test_email_shredder(event, order):
     assert 'Foo' not in l1.data
     l2.refresh_from_db()
     assert '@' not in l2.data
+    assert not OutgoingMail.objects.filter(pk=m.pk).exists()
 
 
 @pytest.mark.django_db
@@ -332,8 +342,11 @@ def test_invoice_shredder(event, order):
     s.shred_data()
     inv.refresh_from_db()
 
-    assert "Acme" not in inv.invoice_to
-    assert "icket" not in inv.lines.first().description
+    assert inv.invoice_to == "█"
+    assert inv.invoice_to_company == "█"
+    l = inv.lines.first()
+    assert l.description == "█"
+    assert l.attendee_name == "█"
     assert not inv.file
     assert not os.path.exists(fname)
 

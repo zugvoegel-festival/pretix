@@ -1,5 +1,6 @@
 doc/
 env/
+node_modules/
 res/
 # local/ - commented out to allow local plugins in Docker build
 .git/

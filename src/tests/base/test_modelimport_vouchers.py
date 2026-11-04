@@ -37,7 +37,7 @@ def event():
     o = Organizer.objects.create(name='Dummy', slug='dummy')
     event = Event.objects.create(
         organizer=o, name='Dummy', slug='dummy',
-        date_from=now(), plugins='pretix.plugins.banktransfer,pretix.plugins.paypal'
+        date_from=now(), plugins='pretix.plugins.banktransfer,pretix.plugins.paypal2'
     )
     return event
 
@@ -170,7 +170,7 @@ def test_price_mode_validation(event, item, user):
         import_vouchers.apply(
             args=(event.pk, inputfile_factory().id, settings, 'en', user.pk)
         ).get()
-    assert 'It is pointless to set a value without a price mode.' in str(excinfo.value)
+    assert 'It is pointless to set a value without a price effect.' in str(excinfo.value)
 
     settings['price_mode'] = 'static:percent'
     import_vouchers.apply(

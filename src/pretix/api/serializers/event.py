@@ -35,10 +35,13 @@
 import logging
 
 from django.conf import settings
-from django.core.exceptions import PermissionDenied
+from django.core.exceptions import (
+    PermissionDenied, ValidationError as DjangoValidationError,
+)
 from django.db import transaction
 from django.utils.crypto import get_random_string
 from django.utils.functional import cached_property
+from django.utils.html import strip_tags
 from django.utils.translation import gettext as _
 from django_countries.serializers import CountryFieldMixin
 from pytz import common_timezones
@@ -48,7 +51,7 @@ from rest_framework.fields import ChoiceField, Field
 from rest_framework.relations import SlugRelatedField
 
 from pretix.api.serializers import (
-    CompatibleJSONField, SalesChannelMigrationMixin,
+    CompatDecimalField, CompatibleJSONField, SalesChannelMigrationMixin,
 )
 from pretix.api.serializers.fields import PluginsField
 from pretix.api.serializers.i18n import I18nAwareModelSerializer
@@ -73,7 +76,7 @@ from pretix.base.settings import (
     LazyI18nStringList, validate_event_settings,
 )
 from pretix.base.signals import api_event_settings_fields
-from pretix.multidomain.urlreverse import build_absolute_uri
+from pretix.multidomain.urlreverse import eventreverse_absolute
 
 logger = logging.getLogger(__name__)
 
@@ -173,7 +176,7 @@ class EventSerializer(SalesChannelMigrationMixin, I18nAwareModelSerializer):
     )
 
     def get_event_url(self, event):
-        return build_absolute_uri(event, 'presale:event.index')
+        return eventreverse_absolute(event, 'presale:event.index')
 
     class Meta:
         model = Event
@@ -218,8 +221,6 @@ class EventSerializer(SalesChannelMigrationMixin, I18nAwareModelSerializer):
             if self.instance is None:
                 raise ValidationError(_('Events cannot be created as \'live\'. Quotas and payment must be added to the '
                                         'event before sales can go live.'))
-            else:
-                self.instance.clean_live()
         return value
 
     @cached_property
@@ -300,7 +301,7 @@ class EventSerializer(SalesChannelMigrationMixin, I18nAwareModelSerializer):
     def ignored_meta_properties(self):
         perm_holder = (self.context['request'].auth if isinstance(self.context['request'].auth, (Device, TeamAPIToken))
                        else self.context['request'].user)
-        if perm_holder.has_organizer_permission(self.context['request'].organizer, 'can_change_organizer_settings', request=self.context['request']):
+        if perm_holder.has_organizer_permission(self.context['request'].organizer, 'organizer.settings.general:write', request=self.context['request']):
             return []
         return [k for k, p in self.meta_properties.items() if p.protected]
 
@@ -429,6 +430,14 @@ class EventSerializer(SalesChannelMigrationMixin, I18nAwareModelSerializer):
             event.set_active_plugins(plugins)
             event.save()
 
+        live = validated_data.get('live') or event.live
+        if live:
+            event.refresh_from_db()
+            try:
+                event.clean_live()
+            except DjangoValidationError as e:
+                raise ValidationError({'live': [strip_tags(m) for m in e.messages]})
+
         return event
 
 
@@ -445,7 +454,7 @@ class CloneEventSerializer(EventSerializer):
         date_admission = validated_data.pop('date_admission', None)
         new_event = super().create({**validated_data, 'plugins': None})
 
-        event = Event.objects.filter(slug=self.context['event'], organizer=self.context['organizer'].pk).first()
+        event = self.context['event']
         new_event.copy_data_from(event, skip_meta_data='meta_data' in validated_data)
 
         if plugins is not None:
@@ -561,7 +570,7 @@ class SubEventSerializer(I18nAwareModelSerializer):
     def ignored_meta_properties(self):
         perm_holder = (self.context['request'].auth if isinstance(self.context['request'].auth, (Device, TeamAPIToken))
                        else self.context['request'].user)
-        if perm_holder.has_organizer_permission(self.context['request'].organizer, 'can_change_organizer_settings', request=self.context['request']):
+        if perm_holder.has_organizer_permission(self.context['request'].organizer, 'organizer.settings.general:write', request=self.context['request']):
             return []
         return [k for k, p in self.meta_properties.items() if p.protected]
 
@@ -681,6 +690,7 @@ class TaxRuleSerializer(CountryFieldMixin, I18nAwareModelSerializer):
         required=False,
         allow_null=True,
     )
+    rate = CompatDecimalField(max_digits=7, decimal_places=4)
 
     class Meta:
         model = TaxRule
@@ -701,13 +711,20 @@ class TaxRuleSerializer(CountryFieldMixin, I18nAwareModelSerializer):
         return super().save(**kwargs)
 
     def validate_default(self, value):
-        if not value and self.instance.default:
-            raise ValidationError("You can't remove the default property, instead set it on another tax rule.")
+        if not value:
+            if self.instance:
+                if self.instance.default:
+                    raise ValidationError("You can't remove the default property, instead set it on another tax rule.")
+            elif not self.context["event"].tax_rules.exists():
+                raise ValidationError("You can't remove the default property as there is only one tax rule.")
         return value
 
 
 class EventSettingsSerializer(SettingsSerializer):
+    default_write_permission = 'event.settings.general:write'
     default_fields = [
+        # These are readable for all users with access to the events, therefore secrets stored in the settings store
+        # should not be included!
         'imprint_url',
         'checkout_email_helptext',
         'presale_has_ended_text',
@@ -744,6 +761,7 @@ class EventSettingsSerializer(SettingsSerializer):
         'max_items_per_order',
         'reservation_time',
         'contact_mail',
+        'contact_url',
         'show_variations_expanded',
         'hide_sold_out',
         'meta_noindex',
@@ -806,6 +824,7 @@ class EventSettingsSerializer(SettingsSerializer):
         'invoice_reissue_after_modify',
         'invoice_include_free',
         'invoice_generate',
+        'invoice_generate_only_business',
         'invoice_period',
         'invoice_numbers_consecutive',
         'invoice_numbers_prefix',
@@ -867,6 +886,7 @@ class EventSettingsSerializer(SettingsSerializer):
         'og_image',
         'name_scheme',
         'reusable_media_active',
+        'reusable_media_usage_enforced',
         'reusable_media_type_barcode',
         'reusable_media_type_barcode_identifier_length',
         'reusable_media_type_nfc_uid',
@@ -881,6 +901,7 @@ class EventSettingsSerializer(SettingsSerializer):
     readonly_fields = [
         # These are read-only since they are currently only settable on organizers, not events
         'reusable_media_active',
+        'reusable_media_usage_enforced',
         'reusable_media_type_barcode',
         'reusable_media_type_barcode_identifier_length',
         'reusable_media_type_nfc_uid',
@@ -966,6 +987,7 @@ class DeviceEventSettingsSerializer(EventSettingsSerializer):
         'reusable_media_type_nfc_uid',
         'reusable_media_type_nfc_mf0aes',
         'reusable_media_type_nfc_mf0aes_random_uid',
+        'reusable_media_usage_enforced',
         'system_question_order',
         'tax_rule_payment',
         'tax_rule_cancellation',
@@ -1079,16 +1101,16 @@ class SeatSerializer(I18nAwareModelSerializer):
 
     def prefetch_expanded_data(self, items, request, expand_fields):
         if 'orderposition' in expand_fields:
-            if 'can_view_orders' not in request.eventpermset:
-                raise PermissionDenied('can_view_orders permission required for expand=orderposition')
+            if 'event.orders:read' not in request.eventpermset:
+                raise PermissionDenied('event.orders:read permission required for expand=orderposition')
             prefetch_by_id(items, OrderPosition.objects.prefetch_related('order'), 'orderposition_id', 'orderposition')
         if 'cartposition' in expand_fields:
-            if 'can_view_orders' not in request.eventpermset:
-                raise PermissionDenied('can_view_orders permission required for expand=cartposition')
+            if 'event.orders:read' not in request.eventpermset:
+                raise PermissionDenied('event.orders:read permission required for expand=cartposition')
             prefetch_by_id(items, CartPosition.objects, 'cartposition_id', 'cartposition')
         if 'voucher' in expand_fields:
-            if 'can_view_vouchers' not in request.eventpermset:
-                raise PermissionDenied('can_view_vouchers permission required for expand=voucher')
+            if 'event.vouchers:read' not in request.eventpermset:
+                raise PermissionDenied('event.vouchers:read permission required for expand=voucher')
             prefetch_by_id(items, Voucher.objects, 'voucher_id', 'voucher')
 
     def __init__(self, instance, *args, **kwargs):

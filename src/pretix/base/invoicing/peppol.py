@@ -64,7 +64,7 @@ class PeppolIdValidator:
         "0020": "[0-9]{9}",
         "0201": "[0-9a-zA-Z]{6}",
         "0204": "[0-9]{2,12}(-[0-9A-Z]{0,30})?-[0-9]{2}",
-        "0208": "0[0-9]{9}",
+        "0208": "[01][0-9]{9}",
         "0209": ".*",
         "0210": "[A-Z0-9]+",
         "0211": "IT[0-9]{11}",
@@ -73,6 +73,9 @@ class PeppolIdValidator:
         "0205": "[A-Z0-9]+",
         "0221": "T[0-9]{13}",
         "0230": ".*",
+        "0244": "[0-9]{13}",
+        "0245": "[0-9]{10}",
+        "0246": "DE[0-9]{9}(-[0-9]{5})?(\\.[0-9A-Z]{1,8})?",
         "9901": ".*",
         "9902": "[1-9][0-9]{7}",
         "9904": "DK[0-9]{8}",
@@ -120,7 +123,6 @@ class PeppolIdValidator:
         "9951": ".*",
         "9952": ".*",
         "9953": ".*",
-        "9954": ".*",
         "9956": "0[0-9]{9}",
         "9957": ".*",
         "9959": ".*",
@@ -144,7 +146,7 @@ class PeppolIdValidator:
                                   params={"number": prefix})
 
         if self.validate_online:
-            base_hostnames = ['edelivery.tech.ec.europa.eu', 'acc.edelivery.tech.ec.europa.eu']
+            base_hostnames = ['participant.sml.prod.tech.peppol.org', 'participant.sml.test.tech.peppol.org']
             smp_id = base64.b32encode(hashlib.sha256(value.lower().encode()).digest()).decode().rstrip("=")
             for base_hostname in base_hostnames:
                 smp_domain = f'{smp_id}.iso6523-actorid-upis.{base_hostname}'
@@ -177,6 +179,12 @@ class PeppolTransmissionType(TransmissionType):
     def is_available(self, event, country: Country, is_business: bool):
         return is_business and super().is_available(event, country, is_business)
 
+    def is_exclusive(self, event, country: Country, is_business: bool) -> bool:
+        if is_business and str(country) == "BE" and event and event.settings.invoice_address_from_country == "BE":
+            # Peppol is required to be used for intra-Belgian B2B invoices
+            return True
+        return False
+
     @property
     def invoice_address_form_fields(self) -> dict:
         return {
@@ -195,6 +203,12 @@ class PeppolTransmissionType(TransmissionType):
             "company", "street", "zipcode", "city", "country",
         }
         return base | {"transmission_peppol_participant_id"}
+
+    def validate_invoice_address_data(self, address_data: dict):
+        # Special case Belgium: If a Belgian business ID is used as Peppol ID, it should match the VAT ID
+        if address_data.get("transmission_peppol_participant_id").startswith("0208:") and address_data.get("vat_id"):
+            if address_data["vat_id"].removeprefix("BE") != address_data["transmission_peppol_participant_id"].removeprefix("0208:"):
+                raise ValidationError({"transmission_peppol_participant_id": _("The Peppol participant ID does not match your VAT ID.")})
 
     def pdf_watermark(self) -> str:
         return pgettext("peppol_invoice", "Visual copy")

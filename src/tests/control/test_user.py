@@ -286,11 +286,6 @@ class UserPasswordChangeTest(SoupTest):
         assert self.user.needs_password_change is False
 
 
-@pytest.fixture
-def class_monkeypatch(request, monkeypatch):
-    request.cls.monkeypatch = monkeypatch
-
-
 @pytest.mark.usefixtures("class_monkeypatch")
 class UserSettings2FATest(SoupTest):
     def setUp(self):
@@ -339,36 +334,40 @@ class UserSettings2FATest(SoupTest):
 
     def test_gen_emergency(self):
         self.client.get('/control/settings/2fa/')
+        assert not StaticDevice.objects.filter(user=self.user, name='emergency').exists()
+
+        self.client.post('/control/settings/2fa/regenemergency')
         d = StaticDevice.objects.get(user=self.user, name='emergency')
         assert d.token_set.count() == 10
         old_tokens = set(t.token for t in d.token_set.all())
+
         self.client.post('/control/settings/2fa/regenemergency')
-        new_tokens = set(t.token for t in d.token_set.all())
         d = StaticDevice.objects.get(user=self.user, name='emergency')
         assert d.token_set.count() == 10
+        new_tokens = set(t.token for t in d.token_set.all())
         assert old_tokens != new_tokens
 
     def test_delete_u2f(self):
         d = U2FDevice.objects.create(user=self.user, name='Test')
-        self.client.get('/control/settings/2fa/u2f/{}/delete'.format(d.pk))
-        self.client.post('/control/settings/2fa/u2f/{}/delete'.format(d.pk))
+        self.client.get('/control/settings/2fa/pretixbase.u2fdevice/{}/delete'.format(d.pk))
+        self.client.post('/control/settings/2fa/pretixbase.u2fdevice/{}/delete'.format(d.pk))
         assert not U2FDevice.objects.exists()
 
     def test_delete_webauthn(self):
         d = WebAuthnDevice.objects.create(user=self.user, name='Test')
-        self.client.get('/control/settings/2fa/webauthn/{}/delete'.format(d.pk))
-        self.client.post('/control/settings/2fa/webauthn/{}/delete'.format(d.pk))
+        self.client.get('/control/settings/2fa/pretixbase.webauthndevice/{}/delete'.format(d.pk))
+        self.client.post('/control/settings/2fa/pretixbase.webauthndevice/{}/delete'.format(d.pk))
         assert not WebAuthnDevice.objects.exists()
 
     def test_delete_totp(self):
         d = TOTPDevice.objects.create(user=self.user, name='Test')
-        self.client.get('/control/settings/2fa/totp/{}/delete'.format(d.pk))
-        self.client.post('/control/settings/2fa/totp/{}/delete'.format(d.pk))
+        self.client.get('/control/settings/2fa/otp_totp.totpdevice/{}/delete'.format(d.pk))
+        self.client.post('/control/settings/2fa/otp_totp.totpdevice/{}/delete'.format(d.pk))
         assert not TOTPDevice.objects.exists()
 
     def test_create_webauthn_require_https(self):
         r = self.client.post('/control/settings/2fa/add', {
-            'devicetype': 'webauthn',
+            'devicetype': 'pretixbase.webauthndevice',
             'name': 'Foo'
         })
         assert 'alert-danger' in r.content.decode()
@@ -377,7 +376,7 @@ class UserSettings2FATest(SoupTest):
         with mocker_context() as mocker:
             mocker.patch('django.http.request.HttpRequest.is_secure')
             self.client.post('/control/settings/2fa/add', {
-                'devicetype': 'webauthn',
+                'devicetype': 'pretixbase.webauthndevice',
                 'name': 'Foo'
             })
             d = WebAuthnDevice.objects.first()
@@ -386,7 +385,7 @@ class UserSettings2FATest(SoupTest):
 
     def test_create_totp(self):
         self.client.post('/control/settings/2fa/add', {
-            'devicetype': 'totp',
+            'devicetype': 'otp_totp.totpdevice',
             'name': 'Foo'
         })
         d = TOTPDevice.objects.first()
@@ -394,7 +393,7 @@ class UserSettings2FATest(SoupTest):
 
     def test_confirm_totp(self):
         self.client.post('/control/settings/2fa/add', {
-            'devicetype': 'totp',
+            'devicetype': 'otp_totp.totpdevice',
             'name': 'Foo'
         }, follow=True)
         d = TOTPDevice.objects.first()
@@ -412,7 +411,7 @@ class UserSettings2FATest(SoupTest):
 
     def test_confirm_totp_failed(self):
         self.client.post('/control/settings/2fa/add', {
-            'devicetype': 'totp',
+            'devicetype': 'otp_totp.totpdevice',
             'name': 'Foo'
         }, follow=True)
         d = TOTPDevice.objects.first()
@@ -429,7 +428,7 @@ class UserSettings2FATest(SoupTest):
         with mocker_context() as mocker:
             mocker.patch('django.http.request.HttpRequest.is_secure')
             self.client.post('/control/settings/2fa/add', {
-                'devicetype': 'webauthn',
+                'devicetype': 'pretixbase.webauthndevice',
                 'name': 'Foo'
             }, follow=True)
         d = WebAuthnDevice.objects.first()
@@ -444,7 +443,7 @@ class UserSettings2FATest(SoupTest):
         with mocker_context() as mocker:
             mocker.patch('django.http.request.HttpRequest.is_secure')
             self.client.post('/control/settings/2fa/add', {
-                'devicetype': 'webauthn',
+                'devicetype': 'pretixbase.webauthndevice',
                 'name': 'Foo'
             }, follow=True)
 
@@ -478,7 +477,7 @@ class UserSettingsNotificationsTest(SoupTest):
             organizer=o, name='Dummy', slug='dummy',
             date_from=now(), plugins='pretix.plugins.banktransfer'
         )
-        t = o.teams.create(can_change_orders=True, all_events=True)
+        t = o.teams.create(limit_event_permissions={"event.orders:write": True}, all_events=True)
         t.members.add(self.user)
 
     def test_toggle_all(self):

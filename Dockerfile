@@ -1,7 +1,8 @@
 ARG TARGETPLATFORM=linux/amd64
-FROM --platform=${TARGETPLATFORM} python:3.11-bookworm
+FROM --platform=${TARGETPLATFORM} python:3.13-trixie
 
-RUN apt-get update && \
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+    apt-get update && \
     apt-get install -y --no-install-recommends \
             build-essential \
             gettext \
@@ -22,8 +23,7 @@ RUN apt-get update && \
             libmaxminddb0 \
             libmaxminddb-dev \
             zlib1g-dev \
-            nodejs  \
-            npm && \
+            nodejs && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* && \
     dpkg-reconfigure locales &&  \
@@ -32,6 +32,7 @@ RUN apt-get update && \
     mkdir /etc/pretix && \
     mkdir /data && \
     useradd -ms /bin/bash -d /pretix -u 15371 pretixuser && \
+    chmod 0755 /pretix && \
     echo 'pretixuser ALL=(ALL) NOPASSWD:SETENV: /usr/bin/supervisord' >> /etc/sudoers && \
     mkdir /static && \
     mkdir /etc/supervisord
@@ -50,11 +51,14 @@ COPY deployment/docker/production_settings.py /pretix/src/production_settings.py
 COPY pyproject.toml /pretix/pyproject.toml
 COPY _build /pretix/_build
 COPY src /pretix/src
+COPY package.json /pretix/package.json
+COPY package-lock.json /pretix/package-lock.json
+COPY tsconfig.json /pretix/tsconfig.json
+COPY vite.config.ts /pretix/vite.config.ts
 
 RUN pip3 install -U \
         pip \
-        setuptools \
-        wheel && \
+        setuptools && \
     cd /pretix && \
     PRETIX_DOCKER_BUILD=TRUE pip3 install \
         -e ".[memcached]" \

@@ -37,18 +37,20 @@ import re
 from decimal import Decimal
 
 from bs4 import BeautifulSoup
+from django.core import mail as djmail
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase
 from django.utils.timezone import now
 from django_scopes import scopes_disabled
 
 from pretix.base.models import (
-    Event, Item, ItemCategory, ItemVariation, Order, OrderPosition, Organizer,
-    Question, Quota,
+    Event, Invoice, InvoiceAddress, Item, ItemCategory, ItemVariation, Order,
+    OrderPosition, Organizer, Question, Quota,
 )
 from pretix.base.models.orders import OrderFee, OrderPayment
 from pretix.base.reldate import RelativeDate, RelativeDateWrapper
 from pretix.base.services.invoices import generate_invoice
+from pretix.testutils.scope import classscope
 
 
 class BaseOrdersTest(TestCase):
@@ -1076,7 +1078,7 @@ class OrdersTest(BaseOrdersTest):
         self.event.date_from = now() + datetime.timedelta(days=3)
         self.event.save()
         self.event.settings.set('ticket_download_date', RelativeDateWrapper(RelativeDate(
-            base_date_name='date_from', days=2, time=None, minutes=None
+            base_date_name='event__date_from', days=2, time=None, minutes=None
         )))
         response = self.client.post(
             '/%s/%s/order/%s/%s/download/%d/testdummy' % (self.orga.slug, self.event.slug, self.order.code,
@@ -1702,6 +1704,63 @@ class OrdersTest(BaseOrdersTest):
         assert 'Gift card' in response.content.decode()
         assert '1 available' in response.content.decode()
 
+    @classscope("orga")
+    def test_change_paymentmethod_invoice(self):
+        self.event.settings.payment_banktransfer__enabled = True
+        self.event.settings.payment_banktransfer_invoice_immediately = True
+        self.event.settings.invoice_generate = "paid"
+        InvoiceAddress.objects.create(
+            order=self.order,
+            transmission_type="email"
+        )
+
+        assert self.order.invoices.count() == 0
+
+        with self.captureOnCommitCallbacks(execute=True):
+            self.client.post(
+                '/%s/%s/order/%s/%s/pay/change' % (self.orga.slug, self.event.slug, self.order.code, self.order.secret),
+                {
+                    'payment': 'banktransfer'
+                }
+            )
+
+        assert self.order.payments.last().provider == 'banktransfer'
+        assert self.order.invoices.count() == 1
+        i = self.order.invoices.last()
+        assert i.transmission_status == Invoice.TRANSMISSION_STATUS_PENDING
+        assert len(djmail.outbox) == 0
+
+    @classscope("orga")
+    def test_change_paymentmethod_invoice_separately(self):
+        self.event.settings.payment_banktransfer__enabled = True
+        self.event.settings.payment_banktransfer_invoice_immediately = True
+        self.event.settings.invoice_generate = "paid"
+        InvoiceAddress.objects.create(
+            order=self.order,
+            transmission_type="email",
+            transmission_info={
+                "transmission_email_other": True,
+                "transmission_email_address": "invoice@example.org",
+            }
+        )
+
+        assert self.order.invoices.count() == 0
+
+        with self.captureOnCommitCallbacks(execute=True):
+            self.client.post(
+                '/%s/%s/order/%s/%s/pay/change' % (self.orga.slug, self.event.slug, self.order.code, self.order.secret),
+                {
+                    'payment': 'banktransfer'
+                }
+            )
+
+        assert self.order.payments.last().provider == 'banktransfer'
+        assert self.order.invoices.count() == 1
+        i = self.order.invoices.last()
+        assert i.transmission_status == Invoice.TRANSMISSION_STATUS_COMPLETED
+        assert ["invoice@example.org"] == djmail.outbox[0].to
+        assert any(["Invoice_" in a[0] for a in djmail.outbox[0].attachments])
+
     def test_answer_download_token(self):
         with scopes_disabled():
             q = self.event.questions.create(question="Foo", type="F")
@@ -1738,3 +1797,222 @@ class OrdersTest(BaseOrdersTest):
                                                         self.order.secret, a.pk, match.group(1))
         )
         assert response.status_code == 404
+
+    def test_require_login_for_order_access_disabled_unauth(self):
+        self.orga.settings.customer_accounts = True
+
+        with scopes_disabled():
+            customer = self.orga.customers.create(email='john@example.org', is_verified=True)
+            customer.set_password("foo")
+            customer.save()
+
+        self.order.customer = customer
+        self.order.save()
+
+        self.orga.settings.customer_accounts_require_login_for_order_access = False
+
+        response = self.client.get(
+            '/%s/%s/order/%s/%s/' % (self.orga.slug, self.event.slug, self.order.code, self.order.secret)
+        )
+        assert response.status_code == 200
+        doc = BeautifulSoup(response.content.decode(), "lxml")
+        assert len(doc.select(".cart-row")) > 0
+        assert "pending" in doc.select(".order-details")[0].text.lower()
+        assert "Peter" in response.content.decode()
+        assert "Lukas" not in response.content.decode()
+
+        response = self.client.get(
+            '/%s/%s/ticket/%s/%s/%s/' % (self.orga.slug, self.event.slug, self.order.code,
+                                         self.ticket_pos.positionid, self.ticket_pos.web_secret)
+        )
+        assert response.status_code == 200
+        doc = BeautifulSoup(response.content.decode(), "lxml")
+        assert len(doc.select(".cart-row")) > 0
+        assert "pending" in doc.select(".order-details")[0].text.lower()
+        assert "Peter" in response.content.decode()
+        assert "Lukas" not in response.content.decode()
+
+    def test_require_login_for_order_access_enabled_unauth(self):
+        self.orga.settings.customer_accounts = True
+
+        with scopes_disabled():
+            customer = self.orga.customers.create(email='john@example.org', is_verified=True)
+            customer.set_password("foo")
+            customer.save()
+
+        self.order.customer = customer
+        self.order.save()
+
+        self.orga.settings.customer_accounts_require_login_for_order_access = True
+
+        response = self.client.get(
+            '/%s/%s/order/%s/%s/' % (self.orga.slug, self.event.slug, self.order.code, self.order.secret)
+        )
+        assert response.status_code == 302
+
+        response = self.client.get(
+            '/%s/%s/ticket/%s/%s/%s/' % (self.orga.slug, self.event.slug, self.order.code,
+                                         self.ticket_pos.positionid, self.ticket_pos.web_secret)
+        )
+        assert response.status_code == 200
+        doc = BeautifulSoup(response.content.decode(), "lxml")
+        assert len(doc.select(".cart-row")) > 0
+        assert "pending" in doc.select(".order-details")[0].text.lower()
+        assert "Peter" in response.content.decode()
+        assert "Lukas" not in response.content.decode()
+
+    def test_require_login_for_order_access_disabled_auth(self):
+        self.orga.settings.customer_accounts = True
+
+        with scopes_disabled():
+            customer = self.orga.customers.create(email='john@example.org', is_verified=True)
+            customer.set_password("foo")
+            customer.save()
+
+        self.order.customer = customer
+        self.order.save()
+
+        self.orga.settings.customer_accounts_require_login_for_order_access = False
+
+        response = self.client.post('/%s/account/login' % (self.orga.slug), {
+            'email': 'john@example.org',
+            'password': 'foo',
+        })
+        assert response.status_code == 302
+
+        response = self.client.get(
+            '/%s/%s/order/%s/%s/' % (self.orga.slug, self.event.slug, self.order.code, self.order.secret)
+        )
+        assert response.status_code == 200
+        doc = BeautifulSoup(response.content.decode(), "lxml")
+        assert len(doc.select(".cart-row")) > 0
+        assert "pending" in doc.select(".order-details")[0].text.lower()
+        assert "Peter" in response.content.decode()
+        assert "Lukas" not in response.content.decode()
+
+        response = self.client.get(
+            '/%s/%s/ticket/%s/%s/%s/' % (self.orga.slug, self.event.slug, self.order.code,
+                                         self.ticket_pos.positionid, self.ticket_pos.web_secret)
+        )
+        assert response.status_code == 200
+        doc = BeautifulSoup(response.content.decode(), "lxml")
+        assert len(doc.select(".cart-row")) > 0
+        assert "pending" in doc.select(".order-details")[0].text.lower()
+        assert "Peter" in response.content.decode()
+        assert "Lukas" not in response.content.decode()
+
+    def test_require_login_for_order_access_enabled_auth(self):
+        self.orga.settings.customer_accounts = True
+
+        with scopes_disabled():
+            customer = self.orga.customers.create(email='john@example.org', is_verified=True)
+            customer.set_password("foo")
+            customer.save()
+
+        self.order.customer = customer
+        self.order.save()
+
+        self.orga.settings.customer_accounts_require_login_for_order_access = True
+
+        response = self.client.post('/%s/account/login' % (self.orga.slug), {
+            'email': 'john@example.org',
+            'password': 'foo',
+        })
+        assert response.status_code == 302
+
+        response = self.client.get(
+            '/%s/%s/order/%s/%s/' % (self.orga.slug, self.event.slug, self.order.code, self.order.secret)
+        )
+        assert response.status_code == 200
+        doc = BeautifulSoup(response.content.decode(), "lxml")
+        assert len(doc.select(".cart-row")) > 0
+        assert "pending" in doc.select(".order-details")[0].text.lower()
+        assert "Peter" in response.content.decode()
+        assert "Lukas" not in response.content.decode()
+
+        response = self.client.get(
+            '/%s/%s/ticket/%s/%s/%s/' % (self.orga.slug, self.event.slug, self.order.code,
+                                         self.ticket_pos.positionid, self.ticket_pos.web_secret)
+        )
+        assert response.status_code == 200
+        doc = BeautifulSoup(response.content.decode(), "lxml")
+        assert len(doc.select(".cart-row")) > 0
+        assert "pending" in doc.select(".order-details")[0].text.lower()
+        assert "Peter" in response.content.decode()
+        assert "Lukas" not in response.content.decode()
+
+    def test_require_login_for_order_access_accounts_disabled(self):
+        self.orga.settings.customer_accounts = True
+
+        with scopes_disabled():
+            customer = self.orga.customers.create(email='john@example.org', is_verified=True)
+            customer.set_password("foo")
+            customer.save()
+
+        self.order.customer = customer
+        self.order.save()
+
+        self.orga.settings.customer_accounts = False
+        self.orga.settings.customer_accounts_require_login_for_order_access = True
+
+        response = self.client.get(
+            '/%s/%s/order/%s/%s/' % (self.orga.slug, self.event.slug, self.order.code, self.order.secret)
+        )
+        assert response.status_code == 200
+        doc = BeautifulSoup(response.content.decode(), "lxml")
+        assert len(doc.select(".cart-row")) > 0
+        assert "pending" in doc.select(".order-details")[0].text.lower()
+        assert "Peter" in response.content.decode()
+        assert "Lukas" not in response.content.decode()
+
+    def test_require_login_for_order_access_enabled_wrong_customer(self):
+        self.orga.settings.customer_accounts = True
+
+        with scopes_disabled():
+            customer = self.orga.customers.create(email='john@example.org', is_verified=True)
+            customer.set_password("foo")
+            customer.save()
+
+        self.order.customer = customer
+        self.order.save()
+
+        with scopes_disabled():
+            customer = self.orga.customers.create(email='jill@example.org', is_verified=True)
+            customer.set_password("bar")
+            customer.save()
+
+        self.orga.settings.customer_accounts_require_login_for_order_access = True
+
+        response = self.client.post('/%s/account/login' % (self.orga.slug), {
+            'email': 'jill@example.org',
+            'password': 'bar',
+        })
+        assert response.status_code == 302
+
+        response = self.client.get(
+            '/%s/%s/order/%s/%s/' % (self.orga.slug, self.event.slug, self.order.code, self.order.secret)
+        )
+        assert response.status_code == 404
+
+    def test_require_login_for_order_access_enabled_unverified_account(self):
+        self.orga.settings.customer_accounts = True
+
+        with scopes_disabled():
+            customer = self.orga.customers.create(email='john@example.org', is_verified=False)
+            customer.set_password("foo")
+            customer.save()
+
+        self.order.customer = customer
+        self.order.save()
+
+        self.orga.settings.customer_accounts_require_login_for_order_access = True
+
+        response = self.client.get(
+            '/%s/%s/order/%s/%s/' % (self.orga.slug, self.event.slug, self.order.code, self.order.secret)
+        )
+        assert response.status_code == 200
+        doc = BeautifulSoup(response.content.decode(), "lxml")
+        assert len(doc.select(".cart-row")) > 0
+        assert "pending" in doc.select(".order-details")[0].text.lower()
+        assert "Peter" in response.content.decode()
+        assert "Lukas" not in response.content.decode()
